@@ -1,32 +1,51 @@
-# React + TypeScript + Vite
+# FICSIT Factory Planner
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Planejador de cadeia de produção para o jogo [Satisfactory](https://www.satisfactorygame.com/) (dados da versão 1.0). Aplicação client-side (sem backend): você declara os nós de recurso que possui e o item que quer produzir, e o app calcula a cadeia inteira balanceada, do minério até o armazenamento.
 
-Currently, two official plugins are available:
+Para cada estágio ele resolve quantas máquinas construir, o clock da máquina parcial (underclock), o consumo de energia, o número de esteiras/canos por trecho e os subprodutos excedentes.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Como funciona
 
-## React Compiler
+O modelo é **supply-driven**: a taxa de saída não é uma meta que você digita, ela emerge dos nós que você tem. O planejador identifica o recurso mais escasso da cadeia (menor razão entre oferta e demanda) e dimensiona toda a fábrica por ele, reportando qual é o recurso limitante.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Fluxo de uso:
 
-## Expanding the Oxlint configuration
+1. Adicione nós de recurso (tipo, pureza, quantidade).
+2. Escolha os tiers de logística (miner, esteira, cano).
+3. Escolha o item de saída (só aparecem itens produzíveis a partir dos seus nós).
+4. Opcionalmente, troque receitas padrão por alternadas; a cadeia rebalanceia na hora.
+5. Veja o esquema visual e o detalhamento por estágio.
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+## Arquitetura
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+Separação em camadas, com toda a lógica de domínio pura e testável de forma headless:
+
+- **`src/data`** — `data1.0.json` (dump do jogo, via [greeny/SatisfactoryTools](https://github.com/greeny/SatisfactoryTools), mesma origem da [wiki.gg](https://satisfactory.wiki.gg/)) e `loader.ts`, que transforma o JSON bruto no modelo de domínio.
+- **`src/engine`** — o núcleo. `solve.ts` monta o fecho de receitas a partir do alvo (com detecção de ciclo), calcula demanda até os recursos raw, dimensiona pela oferta e gera os estágios e trechos de transporte. `helpers.ts` descobre os itens produzíveis e os pontos de troca de receita. `types.ts` guarda o modelo e as constantes verificadas (velocidades de esteira/cano, taxa do Water Extractor).
+- **`src/components`** — `Schematic.tsx` desenha o diagrama SVG (colunas por profundidade) e `Breakdown.tsx` monta o resumo e a tabela por estágio.
+
+Todas as taxas são por minuto; fluidos em m³.
+
+## Escopo da v1
+
+Exclusões deliberadas (não são bugs):
+
+- Nitrogen Gas fora dos recursos de nó (exige Resource Well Pressurizer, mecânica diferente).
+- Subprodutos viram excedente reportado, nunca são reciclados de volta na cadeia.
+- Receitas `Unpackage` nunca são escolhidas por padrão (evita ciclos como Fuel → Packaged Fuel → Fuel).
+- Receitas de Converter que produzem minério são ignoradas (recurso raw é sempre extraído).
+- Potência de receitas com power variável usa a média entre min e max.
+
+## Stack
+
+Vite · React 19 · TypeScript · Vitest · Oxlint
+
+## Scripts
+
+```bash
+npm install      # instala dependências
+npm run dev      # servidor de desenvolvimento
+npm test         # roda os testes (Vitest)
+npm run build    # type-check e build de produção
+npm run lint     # Oxlint
 ```
-
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
