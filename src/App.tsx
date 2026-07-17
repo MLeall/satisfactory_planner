@@ -1,10 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { loadGameData } from './data/loader'
 import { getChainItems, reachableTargets } from './engine/helpers'
-import { solve } from './engine/solve'
+import { solve, type TargetOutput } from './engine/solve'
 import { BELT_TIERS, PIPE_TIERS, type Purity } from './engine/types'
 import Breakdown from './components/Breakdown'
-import Schematic from './components/Schematic'
+import Schematic, { type ViewMode } from './components/Schematic'
 import { fmt } from './ui/format'
 
 const data = loadGameData()
@@ -16,59 +16,136 @@ interface NodeRow {
   count: number
 }
 
+interface OutputRow {
+  key: number
+  item: string
+  rate: string
+}
+
+interface PersistedState {
+  nodes: NodeRow[]
+  minerTier: 1 | 2 | 3
+  beltMk: number
+  pipeMk: number
+  outputs: OutputRow[]
+  selection: Record<string, string>
+  sinkOverflow: boolean
+  viewMode: ViewMode
+}
+
 const PURITIES: Purity[] = ['impure', 'normal', 'pure']
+const STORAGE_KEY = 'ficsit-planner-v2'
 
 const RESOURCE_OPTIONS = data.nodeResources
   .map((id) => ({ id, name: data.items.get(id)?.name ?? id }))
   .sort((a, b) => a.name.localeCompare(b.name))
 
-let nextKey = 1
+function defaults(): PersistedState {
+  return {
+    nodes: [
+      { key: 1, resource: 'Desc_OreIron_C', purity: 'normal', count: 1 },
+    ],
+    minerTier: 1,
+    beltMk: 1,
+    pipeMk: 1,
+    outputs: [{ key: 1, item: 'Desc_IronPlate_C', rate: '' }],
+    selection: {},
+    sinkOverflow: false,
+    viewMode: 'standard',
+  }
+}
+
+function loadState(): PersistedState {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return defaults()
+    return { ...defaults(), ...(JSON.parse(raw) as Partial<PersistedState>) }
+  } catch {
+    return defaults()
+  }
+}
 
 export default function App() {
-  const [nodes, setNodes] = useState<NodeRow[]>([
-    { key: nextKey++, resource: 'Desc_OreIron_C', purity: 'normal', count: 1 },
-  ])
-  const [minerTier, setMinerTier] = useState<1 | 2 | 3>(1)
-  const [beltMk, setBeltMk] = useState(1)
-  const [pipeMk, setPipeMk] = useState(1)
-  const [targetItem, setTargetItem] = useState('Desc_IronPlate_C')
-  const [targetRate, setTargetRate] = useState('')
-  const [selection, setSelection] = useState<Record<string, string>>({})
+  const initial = useMemo(loadState, [])
+  const [nodes, setNodes] = useState<NodeRow[]>(initial.nodes)
+  const [minerTier, setMinerTier] = useState<1 | 2 | 3>(initial.minerTier)
+  const [beltMk, setBeltMk] = useState(initial.beltMk)
+  const [pipeMk, setPipeMk] = useState(initial.pipeMk)
+  const [outputs, setOutputs] = useState<OutputRow[]>(initial.outputs)
+  const [selection, setSelection] = useState<Record<string, string>>(
+    initial.selection,
+  )
+  const [sinkOverflow, setSinkOverflow] = useState(initial.sinkOverflow)
+  const [viewMode, setViewMode] = useState<ViewMode>(initial.viewMode)
 
-  const rateValue = Number(targetRate)
-  const parsedTarget =
-    targetRate.trim() !== '' && rateValue > 0 ? rateValue : undefined
+  // Keys unique across nodes and outputs, seeded past whatever we loaded.
+  const [nextKey, setNextKey] = useState(
+    () =>
+      Math.max(
+        0,
+        ...initial.nodes.map((n) => n.key),
+        ...initial.outputs.map((o) => o.key),
+      ) + 1,
+  )
+  const takeKey = () => {
+    const k = nextKey
+    setNextKey((v) => v + 1)
+    return k
+  }
+
+  useEffect(() => {
+    const state: PersistedState = {
+      nodes,
+      minerTier,
+      beltMk,
+      pipeMk,
+      outputs,
+      selection,
+      sinkOverflow,
+      viewMode,
+    }
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+    } catch {
+      /* storage unavailable — planning still works in-memory */
+    }
+  }, [nodes, minerTier, beltMk, pipeMk, outputs, selection, sinkOverflow, viewMode])
 
   const targetOptions = useMemo(() => {
-    const ids = reachableTargets(data, nodes.map((n) => n.resource))
+    const ids = reachableTargets(
+      data,
+      nodes.map((n) => n.resource),
+    )
     return ids
       .map((id) => ({ id, name: data.items.get(id)?.name ?? id }))
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [nodes])
 
-  const recipeChoices = useMemo(
-    () =>
-      getChainItems(data, targetItem, selection)
-        .map((id) => ({
-          id,
-          name: data.items.get(id)?.name ?? id,
-          recipes: data.recipesByProduct.get(id) ?? [],
-        }))
-        .filter((c) => c.recipes.length > 1),
-    [targetItem, selection],
-  )
+  const recipeChoices = useMemo(() => {
+    const ids = new Set<string>()
+    for (const o of outputs) {
+      for (const id of getChainItems(data, o.item, selection)) ids.add(id)
+    }
+    return [...ids]
+      .map((id) => ({
+        id,
+        name: data.items.get(id)?.name ?? id,
+        recipes: data.recipesByProduct.get(id) ?? [],
+      }))
+      .filter((c) => c.recipes.length > 1)
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }, [outputs, selection])
 
-  const maxRate = useMemo(() => {
-    const r = solve(data, {
-      nodes,
-      minerTier,
-      beltMk,
-      pipeMk,
-      targetItem,
-      recipeSelection: selection,
-    })
-    return r.ok ? r.plan.targetRate : null
-  }, [nodes, minerTier, beltMk, pipeMk, targetItem, selection])
+  const targets: TargetOutput[] = useMemo(
+    () =>
+      outputs.map((o) => {
+        const rate = Number(o.rate)
+        return o.rate.trim() !== '' && rate > 0
+          ? { item: o.item, rate }
+          : { item: o.item }
+      }),
+    [outputs],
+  )
 
   const result = useMemo(
     () =>
@@ -77,15 +154,49 @@ export default function App() {
         minerTier,
         beltMk,
         pipeMk,
-        targetItem,
+        targets,
         recipeSelection: selection,
-        targetRate: parsedTarget,
+        sinkOverflow,
       }),
-    [nodes, minerTier, beltMk, pipeMk, targetItem, selection, parsedTarget],
+    [nodes, minerTier, beltMk, pipeMk, targets, selection, sinkOverflow],
   )
+
+  // Max sustainable rate hint (only meaningful for a single output).
+  const maxRate = useMemo(() => {
+    if (outputs.length !== 1) return null
+    const r = solve(data, {
+      nodes,
+      minerTier,
+      beltMk,
+      pipeMk,
+      targets: [{ item: outputs[0].item }],
+      recipeSelection: selection,
+    })
+    return r.ok ? r.plan.targets[0].rate : null
+  }, [nodes, minerTier, beltMk, pipeMk, outputs, selection])
 
   const updateNode = (key: number, patch: Partial<NodeRow>) =>
     setNodes((ns) => ns.map((n) => (n.key === key ? { ...n, ...patch } : n)))
+  const updateOutput = (key: number, patch: Partial<OutputRow>) =>
+    setOutputs((os) => os.map((o) => (o.key === key ? { ...o, ...patch } : o)))
+
+  const clearAll = () => {
+    const d = defaults()
+    setNodes(d.nodes)
+    setMinerTier(d.minerTier)
+    setBeltMk(d.beltMk)
+    setPipeMk(d.pipeMk)
+    setOutputs(d.outputs)
+    setSelection(d.selection)
+    setSinkOverflow(d.sinkOverflow)
+    setViewMode(d.viewMode)
+    setNextKey(2)
+    try {
+      localStorage.removeItem(STORAGE_KEY)
+    } catch {
+      /* ignore */
+    }
+  }
 
   return (
     <>
@@ -96,6 +207,9 @@ export default function App() {
         <span className="tagline">
           From resource node to storage, fully balanced
         </span>
+        <button className="clear-all" onClick={clearAll} title="Reset every field">
+          Clear all
+        </button>
       </header>
 
       <aside className="console">
@@ -155,7 +269,7 @@ export default function App() {
               setNodes((ns) => [
                 ...ns,
                 {
-                  key: nextKey++,
+                  key: takeKey(),
                   resource: 'Desc_OreIron_C',
                   purity: 'normal',
                   count: 1,
@@ -218,40 +332,100 @@ export default function App() {
         </section>
 
         <section>
-          <h2 className="eyebrow">Production target</h2>
+          <h2 className="eyebrow">Production targets</h2>
           <p className="recipe-note">
-            Only items producible from your resource nodes are listed. Add
-            more nodes to unlock more outputs.
+            Add one or more outputs. Shared intermediates are produced once and
+            split. Leave the rate blank (single output only) to plan the max.
           </p>
-          <div className="field">
-            <label htmlFor="target">Output item</label>
-            <select
-              id="target"
-              value={targetItem}
-              onChange={(e) => setTargetItem(e.target.value)}
-            >
-              {targetOptions.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <label htmlFor="rate">Output rate (/min)</label>
+          {outputs.map((o) => (
+            <div className="output-row" key={o.key}>
+              <select
+                aria-label="Output item"
+                value={o.item}
+                onChange={(e) => updateOutput(o.key, { item: e.target.value })}
+              >
+                {targetOptions.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                aria-label="Output rate per minute"
+                type="number"
+                min={0}
+                step="any"
+                value={o.rate}
+                placeholder={
+                  outputs.length === 1 && maxRate != null
+                    ? `max ${fmt(maxRate)}`
+                    : '/min'
+                }
+                onChange={(e) => updateOutput(o.key, { rate: e.target.value })}
+              />
+              <button
+                className="remove"
+                title="Remove output"
+                disabled={outputs.length === 1}
+                onClick={() =>
+                  setOutputs((os) => os.filter((x) => x.key !== o.key))
+                }
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+          <button
+            className="add-node"
+            onClick={() =>
+              setOutputs((os) => [
+                ...os,
+                { key: takeKey(), item: targetOptions[0]?.id ?? '', rate: '10' },
+              ])
+            }
+          >
+            + Add output
+          </button>
+        </section>
+
+        <section>
+          <h2 className="eyebrow">Overflow</h2>
+          <label className="checkbox">
             <input
-              id="rate"
-              type="number"
-              min={0}
-              step="any"
-              value={targetRate}
-              placeholder={maxRate != null ? `max ${fmt(maxRate)}` : 'auto'}
-              onChange={(e) => setTargetRate(e.target.value)}
+              type="checkbox"
+              checked={sinkOverflow}
+              onChange={(e) => setSinkOverflow(e.target.checked)}
             />
+            <span>
+              Smart Splitter + AWESOME Sink combo
+              <small>
+                Route solid byproduct overflow into AWESOME Sinks for coupon
+                points instead of leaving it as surplus.
+              </small>
+            </span>
+          </label>
+        </section>
+
+        <section>
+          <h2 className="eyebrow">Floor plan view</h2>
+          <div className="segmented">
+            <button
+              className={viewMode === 'standard' ? 'active' : ''}
+              onClick={() => setViewMode('standard')}
+            >
+              Standard
+            </button>
+            <button
+              className={viewMode === 'complex' ? 'active' : ''}
+              onClick={() => setViewMode('complex')}
+            >
+              Complex
+            </button>
           </div>
           <p className="recipe-note">
-            Leave blank to plan the maximum your nodes sustain
-            {maxRate != null ? ` (${fmt(maxRate)}/min)` : ''}.
+            {viewMode === 'standard'
+              ? 'Compact: machines grouped per stage with counts.'
+              : 'Every machine drawn individually, wired through Splitters and Mergers.'}
           </p>
         </section>
 
@@ -292,9 +466,10 @@ export default function App() {
                 data={data}
                 beltMk={beltMk}
                 pipeMk={pipeMk}
+                viewMode={viewMode}
               />
             </div>
-            <Breakdown plan={result.plan} data={data} targetItem={targetItem} />
+            <Breakdown plan={result.plan} data={data} />
           </>
         ) : (
           <div className="errors">

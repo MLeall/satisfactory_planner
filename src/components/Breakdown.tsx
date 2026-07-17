@@ -1,26 +1,39 @@
-import type { Plan } from '../engine/solve'
+import type { Plan, Stage } from '../engine/solve'
 import type { GameData } from '../engine/types'
 import { fmt } from '../ui/format'
 
 interface Props {
   plan: Plan
   data: GameData
-  targetItem: string
 }
 
-export default function Breakdown({ plan, data, targetItem }: Props) {
+export default function Breakdown({ plan, data }: Props) {
   const itemName = (id: string) => data.items.get(id)?.name ?? id
-  const machineStages = plan.stages.filter((s) => s.kind !== 'storage')
-  const totalMachines = machineStages.reduce((n, s) => n + s.machinesBuilt, 0)
+  const buildStages = plan.stages.filter((s) => s.kind !== 'storage')
+  const totalMachines = buildStages.reduce((n, s) => n + s.machinesBuilt, 0)
+
+  const recipeOrResource = (s: Stage): string => {
+    if (s.kind === 'machine') return s.recipeName ?? ''
+    if (s.kind === 'sink') return itemName(s.inputs[0]?.item ?? '')
+    return itemName(s.outputs[0]?.item ?? '')
+  }
+  const stageOutput = (s: Stage): string => {
+    if (s.kind === 'sink') return `sinks ${fmt(s.inputs[0]?.rate ?? 0)}/min`
+    return s.outputs
+      .map((o) => `${fmt(o.rate)}/min ${itemName(o.item)}`)
+      .join(', ')
+  }
 
   return (
     <div className="breakdown">
       <h2>System breakdown</h2>
       <div className="tiles">
-        <div className="tile">
-          <div className="value">{fmt(plan.targetRate)}/min</div>
-          <div className="label">{itemName(targetItem)} output</div>
-        </div>
+        {plan.targets.map((t) => (
+          <div className="tile" key={t.item}>
+            <div className="value">{fmt(t.rate)}/min</div>
+            <div className="label">{itemName(t.item)} output</div>
+          </div>
+        ))}
         <div className="tile">
           <div className="value">{fmt(plan.totalPowerMW)} MW</div>
           <div className="label">Total power draw</div>
@@ -29,10 +42,16 @@ export default function Breakdown({ plan, data, targetItem }: Props) {
           <div className="value">{totalMachines}</div>
           <div className="label">Machines to build</div>
         </div>
+        {plan.sinkPointsPerMin > 0 && (
+          <div className="tile">
+            <div className="value">{fmt(plan.sinkPointsPerMin)}/min</div>
+            <div className="label">AWESOME Sink points</div>
+          </div>
+        )}
         {plan.limitingResource && (
           <div className="tile">
             <div className="value">{itemName(plan.limitingResource)}</div>
-            <div className="label">Limiting resource</div>
+            <div className="label">Tightest resource</div>
           </div>
         )}
       </div>
@@ -48,21 +67,13 @@ export default function Breakdown({ plan, data, targetItem }: Props) {
           </tr>
         </thead>
         <tbody>
-          {machineStages.map((s) => (
+          {buildStages.map((s) => (
             <tr key={s.id}>
               <td>{s.machineName}</td>
-              <td>
-                {s.kind === 'machine'
-                  ? s.recipeName
-                  : itemName(s.outputs[0].item)}
-              </td>
+              <td>{recipeOrResource(s)}</td>
               <td className="num">{s.machinesBuilt}</td>
               <td className="num">{fmt(s.lastClockPercent)}%</td>
-              <td className="num">
-                {s.outputs
-                  .map((o) => `${fmt(o.rate)}/min ${itemName(o.item)}`)
-                  .join(', ')}
-              </td>
+              <td className="num">{stageOutput(s)}</td>
               <td className="num">{fmt(s.powerMW)} MW</td>
             </tr>
           ))}

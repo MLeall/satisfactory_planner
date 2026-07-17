@@ -12,13 +12,14 @@ import { loadGameData } from '../data/loader'
 //   alloy: 2 iron ore + 2 copper ore -> 1 alloy, 4s  (30+30 in -> 15 out)
 //   goo:   4 water + 2 iron ore -> 2 goo + 1 sludge, 6s, Refinery
 //                                                    (40+20 in -> 20+10 out)
+//   widget: 2 ingot -> 1 widget + 2 scrap, 4s        (scrap is sinkable, 10 pts)
 //   cycle-a: 1 b -> 1 a / cycle-b: 1 a -> 1 b        (circular)
 // ---------------------------------------------------------------------------
 
 const EXP = 1.321929
 
-function item(id: string, name: string, liquid = false): [string, Item] {
-  return [id, { id, name, liquid }]
+function item(id: string, name: string, liquid = false, sinkPoints = 0): [string, Item] {
+  return [id, { id, name, liquid, sinkPoints }]
 }
 
 function machine(id: string, name: string, power: number): [string, Machine] {
@@ -78,6 +79,15 @@ function fixture(): GameData {
       machine: 'Refinery',
     },
     {
+      id: 'r-widget', name: 'Widget', alternate: false, time: 4,
+      ingredients: [{ item: 'ingot', amount: 2 }],
+      products: [
+        { item: 'widget', amount: 1 },
+        { item: 'scrap', amount: 2 },
+      ],
+      machine: 'Constructor',
+    },
+    {
       id: 'r-cycle-a', name: 'Cycle A', alternate: false, time: 1,
       ingredients: [{ item: 'cycle-b', amount: 1 }],
       products: [{ item: 'cycle-a', amount: 1 }],
@@ -105,11 +115,13 @@ function fixture(): GameData {
       item('ore-iron', 'Iron Ore'),
       item('ore-copper', 'Copper Ore'),
       item('water', 'Water', true),
-      item('ingot', 'Ingot'),
-      item('plate', 'Plate'),
+      item('ingot', 'Ingot', false, 2),
+      item('plate', 'Plate', false, 6),
       item('alloy', 'Alloy'),
       item('goo', 'Goo', true),
       item('sludge', 'Sludge', true),
+      item('widget', 'Widget'),
+      item('scrap', 'Scrap', false, 10),
       item('cycle-a', 'Cycle A'),
       item('cycle-b', 'Cycle B'),
     ]),
@@ -120,6 +132,7 @@ function fixture(): GameData {
       machine('Constructor', 'Constructor', 4),
       machine('Refinery', 'Refinery', 30),
     ]),
+    awesomeSink: { id: 'Sink', name: 'AWESOME Sink', power: 30, powerExponent: 1.6 },
     minersByTier: new Map([
       [1, miner(1, 5, 60)],
       [2, miner(2, 15, 120)],
@@ -137,7 +150,7 @@ function fixture(): GameData {
   }
 }
 
-const base: Omit<PlanInput, 'targetItem' | 'nodes'> = {
+const base: Omit<PlanInput, 'targets' | 'nodes'> = {
   minerTier: 1,
   beltMk: 1,
   pipeMk: 1,
@@ -147,7 +160,7 @@ describe('solve: simple chain (ore -> ingot -> plate)', () => {
   const result = solve(fixture(), {
     ...base,
     nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
-    targetItem: 'plate',
+    targets: [{ item: 'plate' }],
   })
 
   it('succeeds', () => {
@@ -158,7 +171,7 @@ describe('solve: simple chain (ore -> ingot -> plate)', () => {
 
   it('computes the max target rate from the node supply', () => {
     // 60 ore -> 60 ingots -> 40 plates
-    expect(plan.targetRate).toBeCloseTo(40, 6)
+    expect(plan.targets[0].rate).toBeCloseTo(40, 6)
   })
 
   it('creates extractor, machine and storage stages in depth order', () => {
@@ -193,7 +206,7 @@ describe('solve: simple chain (ore -> ingot -> plate)', () => {
     expect(oreEdge.rate).toBeCloseTo(60, 6)
     expect(oreEdge.transport).toBe('belt')
     expect(oreEdge.lanes).toBe(1)
-    const storageEdge = plan.edges.find((e) => e.to === 'storage')!
+    const storageEdge = plan.edges.find((e) => e.to === 'storage:plate')!
     expect(storageEdge.item).toBe('plate')
     expect(storageEdge.rate).toBeCloseTo(40, 6)
   })
@@ -208,12 +221,12 @@ describe('solve: node aggregation and belt caps', () => {
         { resource: 'ore-iron', purity: 'normal', count: 1 },
         { resource: 'ore-iron', purity: 'pure', count: 1 },
       ],
-      targetItem: 'ingot',
+      targets: [{ item: 'ingot' }],
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     // 60 + 120 = 180 ore -> 180 ingots
-    expect(result.plan.targetRate).toBeCloseTo(180, 6)
+    expect(result.plan.targets[0].rate).toBeCloseTo(180, 6)
   })
 
   it('caps each miner output at the selected belt speed', () => {
@@ -222,11 +235,11 @@ describe('solve: node aggregation and belt caps', () => {
       minerTier: 3,
       beltMk: 1, // 60/min belt caps the 480/min pure Mk.3 miner
       nodes: [{ resource: 'ore-iron', purity: 'pure', count: 1 }],
-      targetItem: 'ingot',
+      targets: [{ item: 'ingot' }],
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(result.plan.targetRate).toBeCloseTo(60, 6)
+    expect(result.plan.targets[0].rate).toBeCloseTo(60, 6)
   })
 
   it('splits high rates across multiple belt lanes', () => {
@@ -235,7 +248,7 @@ describe('solve: node aggregation and belt caps', () => {
       minerTier: 2,
       beltMk: 2,
       nodes: [{ resource: 'ore-iron', purity: 'normal', count: 2 }],
-      targetItem: 'ingot',
+      targets: [{ item: 'ingot' }],
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
@@ -253,12 +266,12 @@ describe('solve: multiple raw inputs', () => {
         { resource: 'ore-iron', purity: 'normal', count: 1 },
         { resource: 'ore-copper', purity: 'impure', count: 1 },
       ],
-      targetItem: 'alloy',
+      targets: [{ item: 'alloy' }],
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     // copper limits: 30/min -> 15 alloy/min (iron surplus stays in the ground)
-    expect(result.plan.targetRate).toBeCloseTo(15, 6)
+    expect(result.plan.targets[0].rate).toBeCloseTo(15, 6)
     expect(result.plan.limitingResource).toBe('ore-copper')
   })
 
@@ -266,7 +279,7 @@ describe('solve: multiple raw inputs', () => {
     const result = solve(fixture(), {
       ...base,
       nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
-      targetItem: 'alloy',
+      targets: [{ item: 'alloy' }],
     })
     expect(result.ok).toBe(false)
     if (result.ok) return
@@ -278,14 +291,14 @@ describe('solve: water, byproducts and pipes', () => {
   const result = solve(fixture(), {
     ...base,
     nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
-    targetItem: 'goo',
+    targets: [{ item: 'goo' }],
   })
 
   it('auto-supplies water with water extractors', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     // 60 ore -> 3 refineries -> 60 goo, needing 120 water/min -> 1 extractor
-    expect(result.plan.targetRate).toBeCloseTo(60, 6)
+    expect(result.plan.targets[0].rate).toBeCloseTo(60, 6)
     const water = result.plan.stages.find((s) => s.machineId === 'WaterPump')!
     expect(water.machinesBuilt).toBe(1)
     expect(water.powerMW).toBeCloseTo(20, 6)
@@ -311,13 +324,13 @@ describe('solve: recipe selection', () => {
     const result = solve(fixture(), {
       ...base,
       nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
-      targetItem: 'plate',
+      targets: [{ item: 'plate' }],
       recipeSelection: { ingot: 'r-alt-ingot' },
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     // 60 ore -> 90 ingots (alt) -> 60 plates
-    expect(result.plan.targetRate).toBeCloseTo(60, 6)
+    expect(result.plan.targets[0].rate).toBeCloseTo(60, 6)
     const smelters = result.plan.stages.find((s) => s.recipeId === 'r-alt-ingot')!
     expect(smelters.count).toBeCloseTo(2, 6)
   })
@@ -326,7 +339,7 @@ describe('solve: recipe selection', () => {
     const result = solve(fixture(), {
       ...base,
       nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
-      targetItem: 'cycle-a',
+      targets: [{ item: 'cycle-a' }],
     })
     expect(result.ok).toBe(false)
     if (result.ok) return
@@ -339,12 +352,11 @@ describe('solve: target-driven rate', () => {
     const result = solve(fixture(), {
       ...base,
       nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
-      targetItem: 'plate',
-      targetRate: 20, // max is 40
+      targets: [{ item: 'plate', rate: 20 }], // max is 40
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(result.plan.targetRate).toBeCloseTo(20, 6)
+    expect(result.plan.targets[0].rate).toBeCloseTo(20, 6)
     // 20 plates -> 30 ingots -> 30 ore
     const smelters = result.plan.stages.find((s) => s.recipeId === 'r-ingot')!
     expect(smelters.count).toBeCloseTo(1, 6)
@@ -359,8 +371,7 @@ describe('solve: target-driven rate', () => {
     const result = solve(fixture(), {
       ...base,
       nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
-      targetItem: 'plate',
-      targetRate: 100, // max is 40
+      targets: [{ item: 'plate', rate: 100 }], // max is 40
     })
     expect(result.ok).toBe(false)
     if (result.ok) return
@@ -371,14 +382,12 @@ describe('solve: target-driven rate', () => {
     const result = solve(fixture(), {
       ...base,
       nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
-      targetItem: 'plate',
+      targets: [{ item: 'plate', rate: 30 }],
       recipeSelection: { ingot: 'r-alt-ingot' },
-      targetRate: 30, // alt max is 60
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(result.plan.targetRate).toBeCloseTo(30, 6)
-    // 30 plates -> 45 ingots (alt: 2 ore -> 3 ingot) -> 30 ore
+    expect(result.plan.targets[0].rate).toBeCloseTo(30, 6)
     const smelters = result.plan.stages.find(
       (s) => s.recipeId === 'r-alt-ingot',
     )!
@@ -394,12 +403,10 @@ describe('solve: target-driven rate', () => {
         { resource: 'ore-iron', purity: 'normal', count: 1 }, // 60/min
         { resource: 'ore-copper', purity: 'impure', count: 1 }, // 30/min
       ],
-      targetItem: 'alloy',
-      targetRate: 10, // max is 15 (copper-limited)
+      targets: [{ item: 'alloy', rate: 10 }], // max is 15 (copper-limited)
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    // 10 alloy -> 20 iron + 20 copper
     const iron = result.plan.stages.find(
       (s) => s.kind === 'extractor' && s.outputs[0].item === 'ore-iron',
     )!
@@ -414,17 +421,16 @@ describe('solve: target-driven rate', () => {
     const at = solve(fixture(), {
       ...base,
       nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
-      targetItem: 'plate',
-      targetRate: 40,
+      targets: [{ item: 'plate', rate: 40 }],
     })
     const auto = solve(fixture(), {
       ...base,
       nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
-      targetItem: 'plate',
+      targets: [{ item: 'plate' }],
     })
     expect(at.ok && auto.ok).toBe(true)
     if (!at.ok || !auto.ok) return
-    expect(at.plan.targetRate).toBeCloseTo(auto.plan.targetRate, 6)
+    expect(at.plan.targets[0].rate).toBeCloseTo(auto.plan.targets[0].rate, 6)
     expect(at.plan.totalPowerMW).toBeCloseTo(auto.plan.totalPowerMW, 6)
   })
 
@@ -432,12 +438,121 @@ describe('solve: target-driven rate', () => {
     const result = solve(fixture(), {
       ...base,
       nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
-      targetItem: 'plate',
-      targetRate: 0,
+      targets: [{ item: 'plate', rate: 0 }],
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(result.plan.targetRate).toBeCloseTo(40, 6)
+    expect(result.plan.targets[0].rate).toBeCloseTo(40, 6)
+  })
+})
+
+describe('solve: multiple outputs', () => {
+  it('produces each output into its own storage, sharing intermediates', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      // plate needs 30 ingots; the ingot output adds 30 more -> 60 ingots total
+      targets: [
+        { item: 'plate', rate: 20 },
+        { item: 'ingot', rate: 30 },
+      ],
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const storages = result.plan.stages.filter((s) => s.kind === 'storage')
+    expect(storages.map((s) => s.id).sort()).toEqual([
+      'storage:ingot',
+      'storage:plate',
+    ])
+    // A single shared ingot stage covers both demands: 60 ingots -> 2 smelters.
+    const smelters = result.plan.stages.filter((s) => s.recipeId === 'r-ingot')
+    expect(smelters).toHaveLength(1)
+    expect(smelters[0].count).toBeCloseTo(2, 6)
+    const ore = result.plan.stages.find((s) => s.kind === 'extractor')!
+    expect(ore.outputs[0].rate).toBeCloseTo(60, 6)
+    // Storage edges carry the requested rates.
+    expect(
+      result.plan.edges.find((e) => e.to === 'storage:plate')!.rate,
+    ).toBeCloseTo(20, 6)
+    expect(
+      result.plan.edges.find((e) => e.to === 'storage:ingot')!.rate,
+    ).toBeCloseTo(30, 6)
+  })
+
+  it('requires an explicit rate for every output when there are several', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      targets: [{ item: 'plate', rate: 10 }, { item: 'ingot' }],
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.errors.join(' ')).toMatch(/Ingot/)
+  })
+
+  it('reports infeasibility across the combined demand', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }], // 60 ore
+      targets: [
+        { item: 'plate', rate: 40 }, // needs 60 ore alone
+        { item: 'ingot', rate: 10 }, // pushes past capacity
+      ],
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.errors.join(' ')).toMatch(/Iron Ore/)
+  })
+})
+
+describe('solve: AWESOME Sink overflow mode', () => {
+  it('routes sinkable solid surplus into sinks and totals the points', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      targets: [{ item: 'widget', rate: 10 }], // 2 scrap per widget -> 20 scrap
+      sinkOverflow: true,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const sink = result.plan.stages.find((s) => s.kind === 'sink')!
+    expect(sink).toBeDefined()
+    expect(sink.inputs[0].item).toBe('scrap')
+    expect(sink.inputs[0].rate).toBeCloseTo(20, 6)
+    expect(sink.powerMW).toBeCloseTo(30, 6) // 20/min over one belt -> 1 sink
+    // 20 scrap/min * 10 points = 200 points/min
+    expect(result.plan.sinkPointsPerMin).toBeCloseTo(200, 6)
+    // Sunk surplus is no longer reported as leftover.
+    expect(result.plan.surplus.some((s) => s.item === 'scrap')).toBe(false)
+    // An edge feeds the sink.
+    expect(result.plan.edges.some((e) => e.to === 'sink:scrap')).toBe(true)
+  })
+
+  it('leaves liquid surplus untouched (the sink only takes solids)', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      targets: [{ item: 'goo' }],
+      sinkOverflow: true,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.plan.sinkPointsPerMin).toBe(0)
+    expect(result.plan.stages.some((s) => s.kind === 'sink')).toBe(false)
+    expect(result.plan.surplus.some((s) => s.item === 'sludge')).toBe(true)
+  })
+
+  it('does nothing when sink mode is off', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      targets: [{ item: 'widget', rate: 10 }],
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.plan.sinkPointsPerMin).toBe(0)
+    expect(result.plan.stages.some((s) => s.kind === 'sink')).toBe(false)
+    expect(result.plan.surplus.some((s) => s.item === 'scrap')).toBe(true)
   })
 })
 
@@ -446,11 +561,11 @@ describe('solve: raw resource as target', () => {
     const result = solve(fixture(), {
       ...base,
       nodes: [{ resource: 'ore-iron', purity: 'normal', count: 2 }],
-      targetItem: 'ore-iron',
+      targets: [{ item: 'ore-iron' }],
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(result.plan.targetRate).toBeCloseTo(120, 6)
+    expect(result.plan.targets[0].rate).toBeCloseTo(120, 6)
     expect(result.plan.stages.map((s) => s.kind)).toEqual([
       'extractor',
       'storage',
@@ -465,12 +580,12 @@ describe('solve: real dataset integration', () => {
     const result = solve(data, {
       minerTier: 1, beltMk: 1, pipeMk: 1,
       nodes: [{ resource: 'Desc_OreIron_C', purity: 'normal', count: 1 }],
-      targetItem: 'Desc_IronPlate_C',
+      targets: [{ item: 'Desc_IronPlate_C' }],
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     // Wiki: 60 ore -> 2 Smelters -> 60 ingots -> 2 Constructors -> 40 plates
-    expect(result.plan.targetRate).toBeCloseTo(40, 6)
+    expect(result.plan.targets[0].rate).toBeCloseTo(40, 6)
     expect(result.plan.totalPowerMW).toBeCloseTo(5 + 8 + 8, 6)
   })
 
@@ -478,11 +593,11 @@ describe('solve: real dataset integration', () => {
     const result = solve(data, {
       minerTier: 2, beltMk: 3, pipeMk: 1,
       nodes: [{ resource: 'Desc_OreIron_C', purity: 'pure', count: 1 }],
-      targetItem: 'Desc_IronPlateReinforced_C',
+      targets: [{ item: 'Desc_IronPlateReinforced_C' }],
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     // 240 ore/min -> 20 RIP/min (hand-checked against wiki recipe rates)
-    expect(result.plan.targetRate).toBeCloseTo(20, 6)
+    expect(result.plan.targets[0].rate).toBeCloseTo(20, 6)
   })
 })

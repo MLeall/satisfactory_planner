@@ -32,6 +32,7 @@ interface RawItem {
   className: string
   name: string
   liquid: boolean
+  sinkPoints: number
 }
 
 interface RawBuilding {
@@ -79,6 +80,7 @@ export function loadGameData(): GameData {
       id: it.className,
       name: it.name,
       liquid: it.liquid,
+      sinkPoints: it.sinkPoints ?? 0,
     })
   }
 
@@ -162,11 +164,14 @@ export function loadGameData(): GameData {
     (r) => r !== WATER && r !== 'Desc_NitrogenGas_C',
   )
 
+  const awesomeSink = machines.get('Desc_ResourceSink_C')!
+
   return {
     items,
     recipes,
     recipesByProduct,
     machines,
+    awesomeSink,
     minersByTier,
     oilExtractor,
     waterExtractor,

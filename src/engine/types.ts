@@ -9,6 +9,8 @@ export interface Item {
   id: ItemId
   name: string
   liquid: boolean
+  /** AWESOME Sink points per item (0 when not sinkable) */
+  sinkPoints: number
 }
 
 export interface RecipePart {
@@ -93,6 +95,8 @@ export interface GameData {
   /** Recipes that produce a given item, default recipes first */
   recipesByProduct: Map<ItemId, Recipe[]>
   machines: Map<MachineId, Machine>
+  /** AWESOME Sink building (consumes surplus for coupon points) */
+  awesomeSink: Machine
   /** Solid miners indexed by tier (1-3) */
   minersByTier: Map<number, Extractor>
   oilExtractor: Extractor

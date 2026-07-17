@@ -17,17 +17,24 @@ export interface NodeInput {
   count: number
 }
 
+export interface TargetOutput {
+  item: ItemId
+  /** Desired output per minute. For a single target, omit (or <= 0) to plan the
+   * maximum the declared nodes can sustain. Required with multiple targets. */
+  rate?: number
+}
+
 export interface PlanInput {
   nodes: NodeInput[]
   minerTier: 1 | 2 | 3
   beltMk: number
   pipeMk: number
-  targetItem: ItemId
+  /** One or more output items to produce, each into its own storage. */
+  targets: TargetOutput[]
   /** Per-item recipe override (default recipe when absent) */
   recipeSelection?: Record<ItemId, RecipeId>
-  /** Desired target output per minute. When absent (or <= 0), the plan uses
-   * the maximum the declared nodes can sustain. */
-  targetRate?: number
+  /** Route sinkable surplus into AWESOME Sinks for coupon points. */
+  sinkOverflow?: boolean
 }
 
 export interface Flow {
@@ -37,7 +44,7 @@ export interface Flow {
 
 export interface Stage {
   id: string
-  kind: 'extractor' | 'machine' | 'storage'
+  kind: 'extractor' | 'machine' | 'storage' | 'sink'
   machineId: MachineId | null
   machineName: string
   recipeId?: RecipeId
@@ -63,13 +70,20 @@ export interface Edge {
   lanes: number
 }
 
+export interface PlanTarget {
+  item: ItemId
+  rate: number
+}
+
 export interface Plan {
   stages: Stage[]
   edges: Edge[]
-  targetRate: number
+  targets: PlanTarget[]
   limitingResource: ItemId | null
   totalPowerMW: number
   surplus: Flow[]
+  /** AWESOME Sink coupon points per minute (0 when sink mode is off). */
+  sinkPointsPerMin: number
 }
 
 export type SolveResult =
@@ -141,6 +155,10 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
   if (!beltSpeed || !pipeSpeed) return fail('Invalid belt or pipe tier.')
   const transportSpeed = (item: ItemId) =>
     isLiquid(item) ? pipeSpeed : beltSpeed
+  const lanesFor = (item: ItemId, rate: number) =>
+    Math.max(1, Math.ceil(rate / transportSpeed(item) - EPS))
+
+  if (input.targets.length === 0) return fail('Add at least one output item.')
 
   // A raw item is extracted, never crafted (ignores Converter ore recipes).
   const isWater = (id: ItemId) =>
@@ -156,7 +174,7 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     return data.recipesByProduct.get(id)?.[0]
   }
 
-  // --- 1. Build the recipe closure from the target (cycle-checked) ---------
+  // --- 1. Recipe closure over all targets (cycle-checked) ------------------
   const recipeFor = new Map<ItemId, Recipe>()
   const postOrder: ItemId[] = [] // ingredients before their consumers
   const visiting = new Set<ItemId>()
@@ -184,30 +202,29 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     visited.add(id)
     postOrder.push(id)
   }
-  visit(input.targetItem)
+  for (const t of input.targets) visit(t.item)
   if (errors.length > 0) return fail(...errors)
 
   const consumersFirst = [...postOrder].reverse()
 
-  // --- 2. Demand per 1 target/min, to find raw requirements ----------------
-  const demandPerUnit = new Map<ItemId, number>()
-  demandPerUnit.set(input.targetItem, 1)
-  for (const id of consumersFirst) {
-    const recipe = recipeFor.get(id)
-    if (!recipe) continue
-    const demand = demandPerUnit.get(id) ?? 0
-    if (demand <= EPS) continue
-    const prodAmount = recipe.products.find((p) => p.item === id)!.amount
-    const runs = demand / prodAmount
-    for (const ing of recipe.ingredients) {
-      demandPerUnit.set(
-        ing.item,
-        (demandPerUnit.get(ing.item) ?? 0) + runs * ing.amount,
-      )
+  /** Propagate item demand top-down through the chosen recipes. */
+  const propagate = (seed: Map<ItemId, number>): Map<ItemId, number> => {
+    const demand = new Map(seed)
+    for (const id of consumersFirst) {
+      const recipe = recipeFor.get(id)
+      if (!recipe) continue
+      const d = demand.get(id) ?? 0
+      if (d <= EPS) continue
+      const prodAmount = recipe.products.find((p) => p.item === id)!.amount
+      const runs = d / prodAmount
+      for (const ing of recipe.ingredients) {
+        demand.set(ing.item, (demand.get(ing.item) ?? 0) + runs * ing.amount)
+      }
     }
+    return demand
   }
 
-  // --- 3. Node supply -------------------------------------------------------
+  // --- 2. Node supply -------------------------------------------------------
   const extractorFor = (resource: ItemId): Extractor | undefined => {
     if (data.oilExtractor.allowedResources.includes(resource)) {
       return data.oilExtractor
@@ -237,48 +254,79 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     nodeGroups.set(node.resource, groups)
   }
 
-  // --- 4. Max sustainable rate = tightest supply/requirement ratio ----------
-  let maxRate = Infinity
+  // --- 3. Resolve each target's output rate --------------------------------
+  const targetRates = new Map<ItemId, number>()
   let limitingResource: ItemId | null = null
-  for (const [id, perUnit] of demandPerUnit) {
-    if (!isRaw(id) || isWater(id) || perUnit <= EPS) continue
-    const available = supply.get(id) ?? 0
-    if (available <= EPS) {
-      errors.push(`No node supplies ${itemName(id)}. Add a node for it.`)
-      continue
+
+  const singleMax =
+    input.targets.length === 1 &&
+    (input.targets[0].rate === undefined || input.targets[0].rate <= EPS)
+
+  if (singleMax) {
+    // Max mode: scale the single target to the tightest supply/demand ratio.
+    const tItem = input.targets[0].item
+    const perUnit = propagate(new Map([[tItem, 1]]))
+    let maxRate = Infinity
+    for (const [id, pu] of perUnit) {
+      if (!isRaw(id) || isWater(id) || pu <= EPS) continue
+      const available = supply.get(id) ?? 0
+      if (available <= EPS) {
+        errors.push(`No node supplies ${itemName(id)}. Add a node for it.`)
+        continue
+      }
+      const ratio = available / pu
+      if (ratio < maxRate) {
+        maxRate = ratio
+        limitingResource = id
+      }
     }
-    const ratio = available / perUnit
-    if (ratio < maxRate) {
-      maxRate = ratio
-      limitingResource = id
+    if (errors.length > 0) return fail(...errors)
+    if (!Number.isFinite(maxRate)) {
+      return fail('The chain consumes no node resource. Add a resource node.')
     }
-  }
-  if (errors.length > 0) return fail(...errors)
-  if (!Number.isFinite(maxRate)) {
-    return fail('The chain consumes no node resource. Add a resource node.')
+    targetRates.set(tItem, maxRate)
+  } else {
+    for (const t of input.targets) {
+      if (t.rate === undefined || t.rate <= EPS) {
+        errors.push(`Set an output rate for ${itemName(t.item)}.`)
+        continue
+      }
+      targetRates.set(t.item, (targetRates.get(t.item) ?? 0) + t.rate)
+    }
+    if (errors.length > 0) return fail(...errors)
   }
 
-  // A requested target rate drives the plan, bounded by node capacity.
-  let targetRate = maxRate
-  if (input.targetRate !== undefined && input.targetRate > EPS) {
-    if (input.targetRate > maxRate + EPS) {
-      const r = limitingResource!
-      const needed = (demandPerUnit.get(r) ?? 0) * input.targetRate
-      const have = supply.get(r) ?? 0
-      return fail(
-        `Your nodes supply ${round2(have)}/min of ${itemName(r)}, but ` +
-          `${round2(needed)}/min is needed for ${round2(input.targetRate)}/min ` +
-          `of ${itemName(input.targetItem)}. Add nodes or lower the target.`,
-      )
+  // --- 4. Absolute demand + feasibility ------------------------------------
+  const demand = propagate(targetRates)
+
+  if (!singleMax) {
+    let tightest = Infinity
+    for (const [id, need] of demand) {
+      if (!isRaw(id) || isWater(id) || need <= EPS) continue
+      const available = supply.get(id) ?? 0
+      if (available <= EPS) {
+        errors.push(`No node supplies ${itemName(id)}. Add a node for it.`)
+        continue
+      }
+      if (need > available + EPS) {
+        errors.push(
+          `Your nodes supply ${round2(available)}/min of ${itemName(id)}, but ` +
+            `${round2(need)}/min is needed. Add nodes or lower the targets.`,
+        )
+        continue
+      }
+      const ratio = available / need
+      if (ratio < tightest) {
+        tightest = ratio
+        limitingResource = id
+      }
     }
-    targetRate = input.targetRate
+    if (errors.length > 0) return fail(...errors)
   }
 
-  // --- 5. Scale demand to the target rate and build stages -----------------
-  const demand = new Map<ItemId, number>()
-  for (const [id, perUnit] of demandPerUnit) demand.set(id, perUnit * targetRate)
-
+  // --- 5. Build stages and edges -------------------------------------------
   const surplusMap = new Map<ItemId, number>()
+  const byproductSource = new Map<ItemId, string>()
   const depth = new Map<ItemId, number>() // raw items default to 0
   const stages: Stage[] = []
   const edges: Edge[] = []
@@ -312,12 +360,11 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       item: p.item,
       rate: p.amount * runs,
     }))
+    const stageId = producerStageId(id)
     for (const p of recipe.products) {
       if (p.item !== id) {
-        surplusMap.set(
-          p.item,
-          (surplusMap.get(p.item) ?? 0) + p.amount * runs,
-        )
+        surplusMap.set(p.item, (surplusMap.get(p.item) ?? 0) + p.amount * runs)
+        byproductSource.set(p.item, stageId)
       }
     }
 
@@ -326,7 +373,7 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     depth.set(id, stageDepth)
 
     stages.push({
-      id: producerStageId(id),
+      id: stageId,
       kind: 'machine',
       machineId: recipe.machine,
       machineName: machine?.name ?? recipe.machine,
@@ -344,11 +391,11 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     for (const flow of inputs) {
       edges.push({
         from: producerStageId(flow.item),
-        to: producerStageId(id),
+        to: stageId,
         item: flow.item,
         rate: flow.rate,
         transport: isLiquid(flow.item) ? 'pipe' : 'belt',
-        lanes: Math.max(1, Math.ceil(flow.rate / transportSpeed(flow.item) - EPS)),
+        lanes: lanesFor(flow.item, flow.rate),
       })
     }
   }
@@ -395,33 +442,69 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     }
   }
 
-  // Storage terminator.
-  const targetLiquid = isLiquid(input.targetItem)
-  const maxDepth = Math.max(0, ...stages.map((s) => s.depth))
-  stages.push({
-    id: 'storage',
-    kind: 'storage',
-    machineId: null,
-    machineName: targetLiquid ? 'Fluid Buffer' : 'Storage Container',
-    count: 1,
-    machinesBuilt: 1,
-    lastClockPercent: 100,
-    powerMW: 0,
-    inputs: [{ item: input.targetItem, rate: targetRate }],
-    outputs: [],
-    depth: maxDepth + 1,
-  })
-  edges.push({
-    from: producerStageId(input.targetItem),
-    to: 'storage',
-    item: input.targetItem,
-    rate: targetRate,
-    transport: targetLiquid ? 'pipe' : 'belt',
-    lanes: Math.max(
-      1,
-      Math.ceil(targetRate / transportSpeed(input.targetItem) - EPS),
-    ),
-  })
+  const producerDepth = Math.max(0, ...stages.map((s) => s.depth))
+  const terminalDepth = producerDepth + 1
+
+  // One storage container per requested output.
+  for (const [item, rate] of targetRates) {
+    const liquid = isLiquid(item)
+    stages.push({
+      id: `storage:${item}`,
+      kind: 'storage',
+      machineId: null,
+      machineName: liquid ? 'Fluid Buffer' : 'Storage Container',
+      count: 1,
+      machinesBuilt: 1,
+      lastClockPercent: 100,
+      powerMW: 0,
+      inputs: [{ item, rate }],
+      outputs: [],
+      depth: terminalDepth,
+    })
+    edges.push({
+      from: producerStageId(item),
+      to: `storage:${item}`,
+      item,
+      rate,
+      transport: liquid ? 'pipe' : 'belt',
+      lanes: lanesFor(item, rate),
+    })
+  }
+
+  // AWESOME Sinks: consume sinkable (solid, point-bearing) surplus for coupons.
+  let sinkPointsPerMin = 0
+  if (input.sinkOverflow) {
+    const sink = data.awesomeSink
+    for (const [item, rate] of surplusMap) {
+      if (rate <= EPS || isLiquid(item)) continue
+      const points = data.items.get(item)?.sinkPoints ?? 0
+      if (points <= 0) continue
+      sinkPointsPerMin += rate * points
+      surplusMap.delete(item)
+      const lanes = lanesFor(item, rate) // one input belt per sink
+      stages.push({
+        id: `sink:${item}`,
+        kind: 'sink',
+        machineId: sink.id,
+        machineName: sink.name,
+        count: lanes,
+        machinesBuilt: lanes,
+        lastClockPercent: 100,
+        powerMW: lanes * sink.power,
+        inputs: [{ item, rate }],
+        outputs: [],
+        depth: terminalDepth,
+      })
+      edges.push({
+        from: byproductSource.get(item) ?? producerStageId(item),
+        to: `sink:${item}`,
+        item,
+        rate,
+        transport: 'belt',
+        lanes,
+      })
+    }
+  }
 
   stages.sort((a, b) => a.depth - b.depth)
 
@@ -430,12 +513,13 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     plan: {
       stages,
       edges,
-      targetRate,
+      targets: [...targetRates].map(([item, rate]) => ({ item, rate })),
       limitingResource,
       totalPowerMW: stages.reduce((sum, s) => sum + s.powerMW, 0),
       surplus: [...surplusMap]
         .filter(([, rate]) => rate > EPS)
         .map(([item, rate]) => ({ item, rate })),
+      sinkPointsPerMin,
     },
   }
 }

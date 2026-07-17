@@ -16,6 +16,17 @@ describe('loadGameData: items', () => {
     expect(data.items.get('Desc_Water_C')!.liquid).toBe(true)
     expect(data.items.get('Desc_LiquidOil_C')!.liquid).toBe(true)
   })
+
+  it('loads AWESOME Sink points per item', () => {
+    expect(data.items.get('Desc_IronPlate_C')!.sinkPoints).toBeGreaterThan(0)
+  })
+})
+
+describe('loadGameData: AWESOME Sink', () => {
+  it('loads the sink building with wiki power (30 MW)', () => {
+    expect(data.awesomeSink.name).toBe('AWESOME Sink')
+    expect(data.awesomeSink.power).toBe(30)
+  })
 })
 
 describe('loadGameData: recipes', () => {
