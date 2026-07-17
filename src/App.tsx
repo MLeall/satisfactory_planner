@@ -5,6 +5,7 @@ import { solve } from './engine/solve'
 import { BELT_TIERS, PIPE_TIERS, type Purity } from './engine/types'
 import Breakdown from './components/Breakdown'
 import Schematic from './components/Schematic'
+import { fmt } from './ui/format'
 
 const data = loadGameData()
 
@@ -31,7 +32,12 @@ export default function App() {
   const [beltMk, setBeltMk] = useState(1)
   const [pipeMk, setPipeMk] = useState(1)
   const [targetItem, setTargetItem] = useState('Desc_IronPlate_C')
+  const [targetRate, setTargetRate] = useState('')
   const [selection, setSelection] = useState<Record<string, string>>({})
+
+  const rateValue = Number(targetRate)
+  const parsedTarget =
+    targetRate.trim() !== '' && rateValue > 0 ? rateValue : undefined
 
   const targetOptions = useMemo(() => {
     const ids = reachableTargets(data, nodes.map((n) => n.resource))
@@ -52,6 +58,18 @@ export default function App() {
     [targetItem, selection],
   )
 
+  const maxRate = useMemo(() => {
+    const r = solve(data, {
+      nodes,
+      minerTier,
+      beltMk,
+      pipeMk,
+      targetItem,
+      recipeSelection: selection,
+    })
+    return r.ok ? r.plan.targetRate : null
+  }, [nodes, minerTier, beltMk, pipeMk, targetItem, selection])
+
   const result = useMemo(
     () =>
       solve(data, {
@@ -61,8 +79,9 @@ export default function App() {
         pipeMk,
         targetItem,
         recipeSelection: selection,
+        targetRate: parsedTarget,
       }),
-    [nodes, minerTier, beltMk, pipeMk, targetItem, selection],
+    [nodes, minerTier, beltMk, pipeMk, targetItem, selection, parsedTarget],
   )
 
   const updateNode = (key: number, patch: Partial<NodeRow>) =>
@@ -218,6 +237,22 @@ export default function App() {
               ))}
             </select>
           </div>
+          <div className="field">
+            <label htmlFor="rate">Output rate (/min)</label>
+            <input
+              id="rate"
+              type="number"
+              min={0}
+              step="any"
+              value={targetRate}
+              placeholder={maxRate != null ? `max ${fmt(maxRate)}` : 'auto'}
+              onChange={(e) => setTargetRate(e.target.value)}
+            />
+          </div>
+          <p className="recipe-note">
+            Leave blank to plan the maximum your nodes sustain
+            {maxRate != null ? ` (${fmt(maxRate)}/min)` : ''}.
+          </p>
         </section>
 
         {recipeChoices.length > 0 && (

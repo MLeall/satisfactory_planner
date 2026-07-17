@@ -334,6 +334,113 @@ describe('solve: recipe selection', () => {
   })
 })
 
+describe('solve: target-driven rate', () => {
+  it('scales the chain down to a requested rate below the max', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      targetItem: 'plate',
+      targetRate: 20, // max is 40
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.plan.targetRate).toBeCloseTo(20, 6)
+    // 20 plates -> 30 ingots -> 30 ore
+    const smelters = result.plan.stages.find((s) => s.recipeId === 'r-ingot')!
+    expect(smelters.count).toBeCloseTo(1, 6)
+    const miner = result.plan.stages.find((s) => s.kind === 'extractor')!
+    expect(miner.count).toBeCloseTo(0.5, 6) // 30 of a 60/min node
+    expect(miner.machinesBuilt).toBe(1)
+    expect(miner.lastClockPercent).toBeCloseTo(50, 6)
+    expect(miner.powerMW).toBeCloseTo(5 * Math.pow(0.5, EXP), 6)
+  })
+
+  it('errors when the requested rate exceeds node capacity', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      targetItem: 'plate',
+      targetRate: 100, // max is 40
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.errors.join(' ')).toMatch(/Iron Ore/)
+  })
+
+  it('keeps recipe selection under a target rate', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      targetItem: 'plate',
+      recipeSelection: { ingot: 'r-alt-ingot' },
+      targetRate: 30, // alt max is 60
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.plan.targetRate).toBeCloseTo(30, 6)
+    // 30 plates -> 45 ingots (alt: 2 ore -> 3 ingot) -> 30 ore
+    const smelters = result.plan.stages.find(
+      (s) => s.recipeId === 'r-alt-ingot',
+    )!
+    expect(smelters).toBeDefined()
+    const miner = result.plan.stages.find((s) => s.kind === 'extractor')!
+    expect(miner.count).toBeCloseTo(0.5, 6)
+  })
+
+  it('reduces non-limiting extractors to what the target needs', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [
+        { resource: 'ore-iron', purity: 'normal', count: 1 }, // 60/min
+        { resource: 'ore-copper', purity: 'impure', count: 1 }, // 30/min
+      ],
+      targetItem: 'alloy',
+      targetRate: 10, // max is 15 (copper-limited)
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // 10 alloy -> 20 iron + 20 copper
+    const iron = result.plan.stages.find(
+      (s) => s.kind === 'extractor' && s.outputs[0].item === 'ore-iron',
+    )!
+    const copper = result.plan.stages.find(
+      (s) => s.kind === 'extractor' && s.outputs[0].item === 'ore-copper',
+    )!
+    expect(iron.count).toBeCloseTo(20 / 60, 6)
+    expect(copper.count).toBeCloseTo(20 / 30, 6)
+  })
+
+  it('a target equal to the max matches the supply-driven plan', () => {
+    const at = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      targetItem: 'plate',
+      targetRate: 40,
+    })
+    const auto = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      targetItem: 'plate',
+    })
+    expect(at.ok && auto.ok).toBe(true)
+    if (!at.ok || !auto.ok) return
+    expect(at.plan.targetRate).toBeCloseTo(auto.plan.targetRate, 6)
+    expect(at.plan.totalPowerMW).toBeCloseTo(auto.plan.totalPowerMW, 6)
+  })
+
+  it('ignores a non-positive target rate (falls back to max)', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      targetItem: 'plate',
+      targetRate: 0,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.plan.targetRate).toBeCloseTo(40, 6)
+  })
+})
+
 describe('solve: raw resource as target', () => {
   it('plans miners straight into storage', () => {
     const result = solve(fixture(), {

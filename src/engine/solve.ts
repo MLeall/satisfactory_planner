@@ -25,6 +25,9 @@ export interface PlanInput {
   targetItem: ItemId
   /** Per-item recipe override (default recipe when absent) */
   recipeSelection?: Record<ItemId, RecipeId>
+  /** Desired target output per minute. When absent (or <= 0), the plan uses
+   * the maximum the declared nodes can sustain. */
+  targetRate?: number
 }
 
 export interface Flow {
@@ -93,6 +96,41 @@ function splitMachines(count: number): { built: number; lastClock: number } {
   const frac = count - whole
   if (frac <= EPS) return { built: whole, lastClock: 100 }
   return { built: whole + 1, lastClock: frac * 100 }
+}
+
+const round2 = (n: number) => Number(n.toFixed(2))
+
+interface NodeGroup {
+  perExtractor: number
+  count: number
+}
+
+/** Minimal extractors to cover `required`, engaging the most productive nodes
+ * first and underclocking only the last (fractional) one. */
+function fillExtractors(
+  required: number,
+  groups: NodeGroup[],
+): { count: number; built: number; lastClock: number } {
+  let remaining = required
+  let whole = 0
+  let frac = 0
+  for (const g of [...groups].sort((a, b) => b.perExtractor - a.perExtractor)) {
+    if (remaining <= EPS) break
+    const units = remaining / g.perExtractor
+    if (units >= g.count - EPS) {
+      whole += g.count
+      remaining -= g.count * g.perExtractor
+    } else {
+      const w = Math.floor(units + EPS)
+      whole += w
+      frac = (remaining - w * g.perExtractor) / g.perExtractor
+      remaining = 0
+    }
+  }
+  const count = whole + frac
+  return frac > EPS
+    ? { count, built: whole + 1, lastClock: frac * 100 }
+    : { count, built: whole, lastClock: 100 }
 }
 
 export function solve(data: GameData, input: PlanInput): SolveResult {
@@ -179,7 +217,7 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
   }
 
   const supply = new Map<ItemId, number>()
-  const nodeCount = new Map<ItemId, number>()
+  const nodeGroups = new Map<ItemId, NodeGroup[]>()
   for (const node of input.nodes) {
     if (node.count <= 0) continue
     const extractor = extractorFor(node.resource)
@@ -194,14 +232,13 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       node.resource,
       (supply.get(node.resource) ?? 0) + node.count * perExtractor,
     )
-    nodeCount.set(
-      node.resource,
-      (nodeCount.get(node.resource) ?? 0) + node.count,
-    )
+    const groups = nodeGroups.get(node.resource) ?? []
+    groups.push({ perExtractor, count: node.count })
+    nodeGroups.set(node.resource, groups)
   }
 
-  // --- 4. Target rate = tightest supply/requirement ratio ------------------
-  let targetRate = Infinity
+  // --- 4. Max sustainable rate = tightest supply/requirement ratio ----------
+  let maxRate = Infinity
   let limitingResource: ItemId | null = null
   for (const [id, perUnit] of demandPerUnit) {
     if (!isRaw(id) || isWater(id) || perUnit <= EPS) continue
@@ -211,14 +248,30 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       continue
     }
     const ratio = available / perUnit
-    if (ratio < targetRate) {
-      targetRate = ratio
+    if (ratio < maxRate) {
+      maxRate = ratio
       limitingResource = id
     }
   }
   if (errors.length > 0) return fail(...errors)
-  if (!Number.isFinite(targetRate)) {
+  if (!Number.isFinite(maxRate)) {
     return fail('The chain consumes no node resource. Add a resource node.')
+  }
+
+  // A requested target rate drives the plan, bounded by node capacity.
+  let targetRate = maxRate
+  if (input.targetRate !== undefined && input.targetRate > EPS) {
+    if (input.targetRate > maxRate + EPS) {
+      const r = limitingResource!
+      const needed = (demandPerUnit.get(r) ?? 0) * input.targetRate
+      const have = supply.get(r) ?? 0
+      return fail(
+        `Your nodes supply ${round2(have)}/min of ${itemName(r)}, but ` +
+          `${round2(needed)}/min is needed for ${round2(input.targetRate)}/min ` +
+          `of ${itemName(input.targetItem)}. Add nodes or lower the target.`,
+      )
+    }
+    targetRate = input.targetRate
   }
 
   // --- 5. Scale demand to the target rate and build stages -----------------
@@ -322,16 +375,19 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       })
     } else {
       const ext = extractorFor(resource)!
-      const count = nodeCount.get(resource)!
+      const { count, built, lastClock } = fillExtractors(
+        consumed,
+        nodeGroups.get(resource) ?? [],
+      )
       stages.push({
         id: `extract:${resource}`,
         kind: 'extractor',
         machineId: ext.id,
         machineName: ext.name,
         count,
-        machinesBuilt: count,
-        lastClockPercent: 100,
-        powerMW: count * ext.power,
+        machinesBuilt: built,
+        lastClockPercent: lastClock,
+        powerMW: stagePower(count, ext.power, DEFAULT_POWER_EXPONENT),
         inputs: [],
         outputs: [{ item: resource, rate: consumed }],
         depth: 0,

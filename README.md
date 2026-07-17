@@ -6,15 +6,18 @@ Para cada estágio ele resolve quantas máquinas construir, o clock da máquina 
 
 ## Como funciona
 
-O modelo é **supply-driven**: a taxa de saída não é uma meta que você digita, ela emerge dos nós que você tem. O planejador identifica o recurso mais escasso da cadeia (menor razão entre oferta e demanda) e dimensiona toda a fábrica por ele, reportando qual é o recurso limitante.
+O planejador é **target-driven**: você informa a taxa de saída desejada e ele dimensiona toda a fábrica para atingi-la, reportando máquinas, energia, extratores e recursos brutos necessários. Os nós declarados (com pureza e quantidade) definem a capacidade disponível; se a taxa pedida exceder o que os nós sustentam, o app aponta o recurso que falta e o quanto.
+
+Deixar o campo de taxa em branco cai no modo **supply-driven**: o planejador calcula o máximo que os nós sustentam, identificando o recurso mais escasso (menor razão entre oferta e demanda) como limitante.
 
 Fluxo de uso:
 
 1. Adicione nós de recurso (tipo, pureza, quantidade).
 2. Escolha os tiers de logística (miner, esteira, cano).
 3. Escolha o item de saída (só aparecem itens produzíveis a partir dos seus nós).
-4. Opcionalmente, troque receitas padrão por alternadas; a cadeia rebalanceia na hora.
-5. Veja o esquema visual e o detalhamento por estágio.
+4. Informe a taxa de saída desejada, ou deixe em branco para o máximo sustentável.
+5. Opcionalmente, troque receitas padrão por alternadas; a cadeia rebalanceia na hora.
+6. Veja o esquema visual e o detalhamento por estágio.
 
 ## Arquitetura
 
