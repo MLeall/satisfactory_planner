@@ -30,10 +30,20 @@ interface PersistedState {
   outputs: OutputRow[]
   selection: Record<string, string>
   buildMode: BuildMode
+  powerShards: PowerShards
   viewMode: ViewMode
 }
 
 type BuildMode = NonNullable<PlanInput['buildMode']>
+type PowerShards = NonNullable<PlanInput['powerShards']>
+
+// Max clock unlocked by the shards slotted into each machine.
+const SHARD_OPTIONS: { shards: PowerShards; label: string }[] = [
+  { shards: 0, label: '100%' },
+  { shards: 1, label: '150%' },
+  { shards: 2, label: '200%' },
+  { shards: 3, label: '250%' },
+]
 
 const PURITIES: Purity[] = ['impure', 'normal', 'pure']
 const STORAGE_KEY = 'ficsit-planner-v2'
@@ -53,6 +63,7 @@ function defaults(): PersistedState {
     outputs: [{ key: 1, item: 'Desc_IronPlate_C', rate: '' }],
     selection: {},
     buildMode: 'exact',
+    powerShards: 0,
     viewMode: 'standard',
   }
 }
@@ -78,6 +89,9 @@ export default function App() {
     initial.selection,
   )
   const [buildMode, setBuildMode] = useState<BuildMode>(initial.buildMode)
+  const [powerShards, setPowerShards] = useState<PowerShards>(
+    initial.powerShards,
+  )
   const [viewMode, setViewMode] = useState<ViewMode>(initial.viewMode)
 
   // Keys unique across nodes and outputs, seeded past whatever we loaded.
@@ -104,6 +118,7 @@ export default function App() {
       outputs,
       selection,
       buildMode,
+      powerShards,
       viewMode,
     }
     try {
@@ -111,7 +126,17 @@ export default function App() {
     } catch {
       /* storage unavailable — planning still works in-memory */
     }
-  }, [nodes, minerTier, beltMk, pipeMk, outputs, selection, buildMode, viewMode])
+  }, [
+    nodes,
+    minerTier,
+    beltMk,
+    pipeMk,
+    outputs,
+    selection,
+    buildMode,
+    powerShards,
+    viewMode,
+  ])
 
   const targetOptions = useMemo(() => {
     const ids = reachableTargets(
@@ -162,8 +187,9 @@ export default function App() {
         // nothing but byproducts to sink, so they just report them.
         sinkOverflow: buildMode === 'whole',
         buildMode,
+        powerShards,
       }),
-    [nodes, minerTier, beltMk, pipeMk, targets, selection, buildMode],
+    [nodes, minerTier, beltMk, pipeMk, targets, selection, buildMode, powerShards],
   )
 
   // Balanced max for the current set of items, solved with every rate blank so
@@ -178,12 +204,13 @@ export default function App() {
       targets: outputs.map((o) => ({ item: o.item })),
       recipeSelection: selection,
       buildMode,
+      powerShards,
     })
     if (r.ok) {
       for (const t of r.plan.targets) rates.set(t.item, t.rate)
     }
     return rates
-  }, [nodes, minerTier, beltMk, pipeMk, outputs, selection, buildMode])
+  }, [nodes, minerTier, beltMk, pipeMk, outputs, selection, buildMode, powerShards])
 
   const updateNode = (key: number, patch: Partial<NodeRow>) =>
     setNodes((ns) => ns.map((n) => (n.key === key ? { ...n, ...patch } : n)))
@@ -199,6 +226,7 @@ export default function App() {
     setOutputs(d.outputs)
     setSelection(d.selection)
     setBuildMode(d.buildMode)
+    setPowerShards(d.powerShards)
     setViewMode(d.viewMode)
     setNextKey(2)
     try {
@@ -419,6 +447,29 @@ export default function App() {
             {buildMode === 'exact'
               ? 'Every stage underclocks its last machine, so the chain produces exactly the demand. Only byproducts are left over, reported as surplus.'
               : 'No underclocking anywhere: machines and miners are rounded up and all run at 100%, the way factories are usually built. Every stage overproduces, and a Smart Splitter routes that overflow into AWESOME Sinks for coupon points. Fluids are never sinkable and stay as surplus.'}
+          </p>
+        </section>
+
+        <section>
+          <h2 className="eyebrow">Overclocking</h2>
+          <div className="segmented">
+            {SHARD_OPTIONS.map((o) => (
+              <button
+                key={o.shards}
+                className={powerShards === o.shards ? 'active' : ''}
+                onClick={() => setPowerShards(o.shards)}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+          <p className="recipe-note">
+            {powerShards === 0
+              ? 'No Power Shards: every machine and miner stays at 100% clock.'
+              : `${powerShards} Power Shard${powerShards > 1 ? 's' : ''} per machine unlocks up to ` +
+                `${100 + 50 * powerShards}% clock, so each stage packs into fewer machines and ` +
+                'miners pull more from a node (never past what the belt carries). ' +
+                'Power draw rises with clock^1.32.'}
           </p>
         </section>
 

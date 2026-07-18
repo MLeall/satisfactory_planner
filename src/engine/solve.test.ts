@@ -826,3 +826,146 @@ describe('solve: real dataset integration', () => {
     expect(result.plan.targets[0].rate).toBeCloseTo(20, 6)
   })
 })
+
+describe('solve: power shard overclocking', () => {
+  const nodes = [
+    { resource: 'ore-iron' as const, purity: 'normal' as const, count: 1 },
+  ]
+
+  it('packs a stage into fewer machines running above 100%', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes,
+      targets: [{ item: 'plate' }],
+      powerShards: 3, // up to 250% clock
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // 60 ore -> 2 smelter-equivalents, now one Smelter at 200%
+    const ingot = result.plan.stages.find((s) => s.recipeId === 'r-ingot')!
+    expect(ingot.count).toBeCloseTo(2, 6)
+    expect(ingot.machinesBuilt).toBe(1)
+    expect(ingot.lastClockPercent).toBeCloseTo(200, 6)
+    expect(ingot.powerMW).toBeCloseTo(4 * Math.pow(2, EXP), 6)
+    expect(ingot.powerShards).toBe(2)
+    // 40 plate -> 4/3 constructor-equivalents -> one at 133.3%
+    const plate = result.plan.stages.find((s) => s.recipeId === 'r-plate')!
+    expect(plate.machinesBuilt).toBe(1)
+    expect(plate.lastClockPercent).toBeCloseTo(400 / 3, 6)
+    expect(plate.powerShards).toBe(1)
+    // Output is unchanged: overclocking rearranges machines, not throughput.
+    expect(result.plan.targets[0].rate).toBeCloseTo(40, 6)
+  })
+
+  it('fills whole machines at max clock before the partial one', () => {
+    const result = solve(fixture(), {
+      ...base,
+      beltMk: 3,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 4 }],
+      targets: [{ item: 'ingot', rate: 250 }],
+      powerShards: 1, // up to 150% clock
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // 250 ingot -> 8.33 smelter-equivalents -> 5 at 150% plus one at 83.3%
+    const ingot = result.plan.stages.find((s) => s.recipeId === 'r-ingot')!
+    expect(ingot.count).toBeCloseTo(25 / 3, 6)
+    expect(ingot.machinesBuilt).toBe(6)
+    expect(ingot.lastClockPercent).toBeCloseTo(250 / 3, 6)
+    expect(ingot.powerMW).toBeCloseTo(
+      5 * 4 * Math.pow(1.5, EXP) + 4 * Math.pow(5 / 6, EXP),
+      6,
+    )
+    expect(ingot.powerShards).toBe(5) // one each; the 50% machine needs none
+  })
+
+  it('reports the total shards the plan consumes', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes,
+      targets: [{ item: 'plate' }],
+      powerShards: 3,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // 2 on the Smelter, 1 on the Constructor, none on the belt-capped miner
+    expect(result.plan.totalPowerShards).toBe(3)
+  })
+
+  it('overclocks extractors, raising the supply the nodes sustain', () => {
+    const result = solve(fixture(), {
+      ...base,
+      beltMk: 3, // 270/min, above the 120/min the pure node gives at 100%
+      nodes: [{ resource: 'ore-iron', purity: 'pure', count: 1 }],
+      targets: [{ item: 'ingot' }],
+      powerShards: 3,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // 120/min at 100%, capped by the belt at 270 -> 225% clock
+    expect(result.plan.targets[0].rate).toBeCloseTo(270, 6)
+    const ore = result.plan.stages.find((s) => s.kind === 'extractor')!
+    expect(ore.machinesBuilt).toBe(1)
+    expect(ore.lastClockPercent).toBeCloseTo(225, 6)
+    expect(ore.powerShards).toBe(3)
+    expect(ore.powerMW).toBeCloseTo(5 * Math.pow(2.25, EXP), 6)
+  })
+
+  it('never overclocks an extractor past its belt', () => {
+    const result = solve(fixture(), {
+      ...base, // Mk.1 belt (60/min) already saturated by a normal node
+      nodes,
+      targets: [{ item: 'ingot' }],
+      powerShards: 3,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.plan.targets[0].rate).toBeCloseTo(60, 6)
+    const ore = result.plan.stages.find((s) => s.kind === 'extractor')!
+    expect(ore.lastClockPercent).toBeCloseTo(100, 6)
+    expect(ore.powerShards).toBe(0)
+    expect(ore.powerMW).toBeCloseTo(5, 6)
+  })
+
+  it('runs every machine at max clock in whole-machine mode', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 2 }],
+      targets: [{ item: 'plate', rate: 20 }],
+      buildMode: 'whole',
+      powerShards: 1, // 150%
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // One Constructor at 150% makes 45 plate/min and eats 67.5 ingot/min
+    const plate = result.plan.stages.find((s) => s.recipeId === 'r-plate')!
+    expect(plate.machinesBuilt).toBe(1)
+    expect(plate.lastClockPercent).toBeCloseTo(150, 6)
+    expect(plate.outputs[0].rate).toBeCloseTo(45, 6)
+    // 67.5 ingot needs 2 Smelters at 150% -> 90 ingot/min
+    const ingot = result.plan.stages.find((s) => s.recipeId === 'r-ingot')!
+    expect(ingot.machinesBuilt).toBe(2)
+    expect(ingot.lastClockPercent).toBeCloseTo(150, 6)
+    expect(ingot.powerShards).toBe(2)
+    expect(ingot.powerMW).toBeCloseTo(2 * 4 * Math.pow(1.5, EXP), 6)
+    const surplus = new Map(result.plan.surplus.map((s) => [s.item, s.rate]))
+    expect(surplus.get('plate')).toBeCloseTo(25, 6)
+    expect(surplus.get('ingot')).toBeCloseTo(22.5, 6)
+  })
+
+  it('leaves plans without shards exactly as they were', () => {
+    const withZero = solve(fixture(), {
+      ...base,
+      nodes,
+      targets: [{ item: 'plate' }],
+      powerShards: 0,
+    })
+    const without = solve(fixture(), {
+      ...base,
+      nodes,
+      targets: [{ item: 'plate' }],
+    })
+    expect(withZero).toEqual(without)
+    expect(withZero.ok && withZero.plan.totalPowerShards).toBe(0)
+  })
+})

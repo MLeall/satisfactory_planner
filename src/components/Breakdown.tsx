@@ -42,6 +42,12 @@ export default function Breakdown({ plan, data }: Props) {
           <div className="value">{totalMachines}</div>
           <div className="label">Machines to build</div>
         </div>
+        {plan.totalPowerShards > 0 && (
+          <div className="tile">
+            <div className="value">{plan.totalPowerShards}</div>
+            <div className="label">Power Shards needed</div>
+          </div>
+        )}
         {plan.sinkPointsPerMin > 0 && (
           <div className="tile">
             <div className="value">{fmt(plan.sinkPointsPerMin)}/min</div>
@@ -62,6 +68,7 @@ export default function Breakdown({ plan, data }: Props) {
             <th>Recipe / resource</th>
             <th style={{ textAlign: 'right' }}>Machines</th>
             <th style={{ textAlign: 'right' }}>Last clock</th>
+            <th style={{ textAlign: 'right' }}>Shards</th>
             <th style={{ textAlign: 'right' }}>Output</th>
             <th style={{ textAlign: 'right' }}>Power</th>
           </tr>
@@ -73,6 +80,7 @@ export default function Breakdown({ plan, data }: Props) {
               <td>{recipeOrResource(s)}</td>
               <td className="num">{s.machinesBuilt}</td>
               <td className="num">{fmt(s.lastClockPercent)}%</td>
+              <td className="num">{s.powerShards || '-'}</td>
               <td className="num">{stageOutput(s)}</td>
               <td className="num">{fmt(s.powerMW)} MW</td>
             </tr>

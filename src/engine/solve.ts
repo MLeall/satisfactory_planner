@@ -43,6 +43,12 @@ export interface PlanInput {
    * (and coupon points when `sinkOverflow` is on).
    */
   buildMode?: 'exact' | 'whole'
+  /**
+   * Power Shards installed in every machine and extractor, each unlocking
+   * another 50% of clock on top of the base 100% (0 → 100%, 1 → 150%,
+   * 2 → 200%, 3 → 250%). Defaults to 0, i.e. no overclocking.
+   */
+  powerShards?: 0 | 1 | 2 | 3
 }
 
 export interface Flow {
@@ -57,13 +63,15 @@ export interface Stage {
   machineName: string
   recipeId?: RecipeId
   recipeName?: string
-  /** Exact machines needed (fractional) */
+  /** Exact machines needed at 100% clock (fractional) */
   count: number
-  /** Machines to build: ceil(count) */
+  /** Machines to build: ceil(count / maxClock) */
   machinesBuilt: number
-  /** Clock % of the last (partial) machine; 100 when count is whole */
+  /** Clock % of the last (partial) machine; the max clock when count divides */
   lastClockPercent: number
   powerMW: number
+  /** Power Shards this stage consumes across all of its machines */
+  powerShards: number
   inputs: Flow[]
   outputs: Flow[]
   depth: number
@@ -89,6 +97,8 @@ export interface Plan {
   targets: PlanTarget[]
   limitingResource: ItemId | null
   totalPowerMW: number
+  /** Power Shards the whole plan consumes */
+  totalPowerShards: number
   surplus: Flow[]
   /** AWESOME Sink coupon points per minute (0 when sink mode is off). */
   sinkPointsPerMin: number
@@ -105,65 +115,110 @@ function fail(...errors: string[]): SolveResult {
   return { ok: false, errors }
 }
 
-/** Effective machine power for a stage of `count` machines: whole machines at
- * 100% plus one machine underclocked to the fractional remainder. */
-function stagePower(count: number, power: number, exponent: number): number {
-  const whole = Math.floor(count + EPS)
-  const frac = count - whole
-  return whole * power + (frac > EPS ? power * Math.pow(frac, exponent) : 0)
+/** Shards needed to run a machine at `clock` (1 = 100%): one per 50% above
+ * the base clock, matching the game's 100/150/200/250% slider steps. */
+function shardsFor(clock: number): number {
+  return Math.max(0, Math.ceil((clock - 1) / 0.5 - EPS))
 }
 
-function splitMachines(count: number): { built: number; lastClock: number } {
-  const whole = Math.floor(count + EPS)
-  const frac = count - whole
-  if (frac <= EPS) return { built: whole, lastClock: 100 }
-  return { built: whole + 1, lastClock: frac * 100 }
+interface Split {
+  /** Machines to build */
+  built: number
+  /** Clock % of the last machine (the max clock when nothing is left over) */
+  lastClock: number
+  /** Sum of clock^exponent, i.e. power in units of one machine at 100% */
+  powerUnits: number
+  shards: number
+}
+
+/** Lay `count` machine-equivalents (at 100% clock) out over as few machines as
+ * `clockMax` allows: every machine but the last runs at `clockMax`, the last
+ * one takes the remainder. With clockMax = 1 this is the plain whole-machines-
+ * plus-one-underclocked layout. */
+function split(count: number, clockMax: number, exponent: number): Split {
+  const full = Math.floor(count / clockMax + EPS)
+  const rest = count - full * clockMax
+  const fullUnits = full * Math.pow(clockMax, exponent)
+  const fullShards = full * shardsFor(clockMax)
+  if (rest <= EPS) {
+    return {
+      built: full,
+      lastClock: clockMax * 100,
+      powerUnits: fullUnits,
+      shards: fullShards,
+    }
+  }
+  return {
+    built: full + 1,
+    lastClock: rest * 100,
+    powerUnits: fullUnits + Math.pow(rest, exponent),
+    shards: fullShards + shardsFor(rest),
+  }
 }
 
 const round2 = (n: number) => Number(n.toFixed(2))
 
 interface NodeGroup {
+  /** Rate one extractor of this group sustains, belt cap included */
   perExtractor: number
+  /** Clock it runs at to reach `perExtractor` (1 = 100%, never below) */
+  clock: number
   count: number
+}
+
+interface Filled extends Split {
+  /** Extractor-equivalents at 100% clock */
+  count: number
+  extracted: number
 }
 
 /** Minimal extractors to cover `required`, engaging the most productive nodes
  * first. In exact mode the last one is underclocked to the remainder, so the
  * extracted rate matches `required`; in whole mode every engaged extractor
- * runs at 100% and the surplus ore becomes overflow. */
+ * runs at its full clock and the surplus ore becomes overflow. */
 function fillExtractors(
   required: number,
   groups: NodeGroup[],
   wholeOnly: boolean,
-): { count: number; built: number; lastClock: number; extracted: number } {
+  exponent: number,
+): Filled {
   let remaining = required
-  let whole = 0
-  let frac = 0
+  let built = 0
+  let count = 0
   let extracted = 0
+  let powerUnits = 0
+  let shards = 0
+  let lastClock = 100
+  const engage = (n: number, clock: number) => {
+    built += n
+    count += n * clock
+    powerUnits += n * Math.pow(clock, exponent)
+    shards += n * shardsFor(clock)
+    if (n > 0) lastClock = clock * 100
+  }
   for (const g of [...groups].sort((a, b) => b.perExtractor - a.perExtractor)) {
     if (remaining <= EPS) break
     const units = remaining / g.perExtractor
     if (units >= g.count - EPS) {
-      whole += g.count
+      engage(g.count, g.clock)
       extracted += g.count * g.perExtractor
       remaining -= g.count * g.perExtractor
     } else if (wholeOnly) {
       const engaged = Math.max(1, Math.ceil(units - EPS))
-      whole += engaged
+      engage(engaged, g.clock)
       extracted += engaged * g.perExtractor
       remaining = 0
     } else {
       const w = Math.floor(units + EPS)
-      whole += w
-      frac = (remaining - w * g.perExtractor) / g.perExtractor
+      engage(w, g.clock)
+      const frac = (remaining - w * g.perExtractor) / g.perExtractor
+      // The leftover extractor runs at whatever clock covers the remainder.
+      if (frac > EPS) engage(1, frac * g.clock)
       extracted += remaining
       remaining = 0
     }
   }
-  const count = whole + frac
-  return frac > EPS
-    ? { count, built: whole + 1, lastClock: frac * 100, extracted }
-    : { count, built: whole, lastClock: 100, extracted }
+  return { count, built, lastClock, powerUnits, shards, extracted }
 }
 
 export function solve(data: GameData, input: PlanInput): SolveResult {
@@ -227,6 +282,8 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
   const consumersFirst = [...postOrder].reverse()
 
   const wholeMode = input.buildMode === 'whole'
+  // Max clock as a multiplier: 1 (no shard) to 2.5 (three shards).
+  const maxClock = 1 + 0.5 * (input.powerShards ?? 0)
 
   interface Propagation {
     /** Rate each item must supply to its consumers (targets included) */
@@ -252,7 +309,7 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       const prodAmount = recipe.products.find((p) => p.item === id)!.amount
       let r = d / prodAmount
       if (whole) {
-        const perMachineRuns = 60 / recipe.time
+        const perMachineRuns = (60 / recipe.time) * maxClock
         // A stage with any demand at all still needs a whole machine.
         r = Math.max(1, Math.ceil(r / perMachineRuns - EPS)) * perMachineRuns
       }
@@ -291,16 +348,20 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     if (!extractor) {
       return fail(`No extractor available for ${itemName(node.resource)}.`)
     }
+    const atFullClock = extractor.ratePerMin * PURITY_MULTIPLIER[node.purity]
     const perExtractor = Math.min(
-      extractor.ratePerMin * PURITY_MULTIPLIER[node.purity],
+      atFullClock * maxClock,
       transportSpeed(node.resource),
     )
+    // Overclocking past what the belt can carry buys nothing but power draw,
+    // so the clock stops at the cap; a belt-capped node stays at 100%.
+    const clock = Math.max(1, perExtractor / atFullClock)
     supply.set(
       node.resource,
       (supply.get(node.resource) ?? 0) + node.count * perExtractor,
     )
     const groups = nodeGroups.get(node.resource) ?? []
-    groups.push({ perExtractor, count: node.count })
+    groups.push({ perExtractor, clock, count: node.count })
     nodeGroups.set(node.resource, groups)
   }
 
@@ -453,13 +514,17 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     const prodAmount = recipe.products.find((p) => p.item === id)!.amount
     const perMachineRuns = 60 / recipe.time
     const count = runs / perMachineRuns
-    const { built, lastClock } = splitMachines(count)
 
     const machine = data.machines.get(recipe.machine)
     const power = recipe.variablePower
       ? (recipe.variablePower.min + recipe.variablePower.max) / 2
       : (machine?.power ?? 0)
     const exponent = machine?.powerExponent ?? DEFAULT_POWER_EXPONENT
+    const { built, lastClock, powerUnits, shards } = split(
+      count,
+      maxClock,
+      exponent,
+    )
 
     const inputs: Flow[] = recipe.ingredients.map((ing) => ({
       item: ing.item,
@@ -498,7 +563,8 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       count,
       machinesBuilt: built,
       lastClockPercent: lastClock,
-      powerMW: stagePower(count, power, exponent),
+      powerMW: power * powerUnits,
+      powerShards: shards,
       inputs,
       outputs,
       depth: stageDepth,
@@ -524,15 +590,24 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     let count: number
     let built: number
     let lastClock: number
+    let powerUnits: number
+    let shards: number
     let extracted: number
 
     if (isWater(resource)) {
       ext = data.waterExtractor
+      // Same belt-cap reasoning as node groups, against the pipe this time.
+      const clock = Math.max(
+        1,
+        Math.min(maxClock, transportSpeed(resource) / ext.ratePerMin),
+      )
       count = consumed / ext.ratePerMin
-      if (wholeMode) count = Math.max(1, Math.ceil(count - EPS))
-      const split = splitMachines(count)
-      built = split.built
-      lastClock = split.lastClock
+      if (wholeMode) count = Math.max(1, Math.ceil(count / clock - EPS)) * clock
+      const s = split(count, clock, DEFAULT_POWER_EXPONENT)
+      built = s.built
+      lastClock = s.lastClock
+      powerUnits = s.powerUnits
+      shards = s.shards
       extracted = wholeMode ? count * ext.ratePerMin : consumed
     } else {
       ext = extractorFor(resource)!
@@ -540,10 +615,13 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
         consumed,
         nodeGroups.get(resource) ?? [],
         wholeMode,
+        DEFAULT_POWER_EXPONENT,
       )
       count = filled.count
       built = filled.built
       lastClock = filled.lastClock
+      powerUnits = filled.powerUnits
+      shards = filled.shards
       extracted = filled.extracted
     }
 
@@ -555,7 +633,8 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       count,
       machinesBuilt: built,
       lastClockPercent: lastClock,
-      powerMW: stagePower(count, ext.power, DEFAULT_POWER_EXPONENT),
+      powerMW: ext.power * powerUnits,
+      powerShards: shards,
       inputs: [],
       outputs: [{ item: resource, rate: extracted }],
       depth: 0,
@@ -584,6 +663,7 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       machinesBuilt: 1,
       lastClockPercent: 100,
       powerMW: 0,
+      powerShards: 0,
       inputs: [{ item, rate }],
       outputs: [],
       depth: terminalDepth,
@@ -618,6 +698,7 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
         machinesBuilt: lanes,
         lastClockPercent: 100,
         powerMW: lanes * sink.power,
+        powerShards: 0,
         inputs: [{ item, rate }],
         outputs: [],
         depth: terminalDepth,
@@ -643,6 +724,7 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       targets: [...targetRates].map(([item, rate]) => ({ item, rate })),
       limitingResource,
       totalPowerMW: stages.reduce((sum, s) => sum + s.powerMW, 0),
+      totalPowerShards: stages.reduce((sum, s) => sum + s.powerShards, 0),
       surplus: [...surplusMap]
         .filter(([, rate]) => rate > EPS)
         .map(([item, rate]) => ({ item, rate })),

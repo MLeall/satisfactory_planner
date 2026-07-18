@@ -68,8 +68,9 @@ function StandardSchematic({ plan, data, beltMk, pipeMk }: Props) {
     if (s.kind === 'storage') return `${fmt(s.inputs[0].rate)}/min stored`
     if (s.kind === 'sink') return `${fmt(s.powerMW)} MW · sink`
     const clock =
-      s.lastClockPercent < 100 ? ` · last @ ${fmt(s.lastClockPercent)}%` : ''
-    return `${fmt(s.powerMW)} MW${clock}`
+      s.lastClockPercent === 100 ? '' : ` · last @ ${fmt(s.lastClockPercent)}%`
+    const shards = s.powerShards > 0 ? ` · ${s.powerShards} shard${s.powerShards > 1 ? 's' : ''}` : ''
+    return `${fmt(s.powerMW)} MW${clock}${shards}`
   }
 
   return (
@@ -268,8 +269,12 @@ function ComplexSchematic({ plan, data, beltMk, pipeMk }: Props) {
     }
   }
 
+  // Every machine but the last runs at the stage's max clock; the last one
+  // takes the remainder. Recovered from the stage totals.
   const unitClock = (s: Stage, i: number, n: number) =>
-    i === n - 1 ? s.lastClockPercent : 100
+    i === n - 1
+      ? s.lastClockPercent
+      : (s.count * 100 - s.lastClockPercent) / (n - 1)
 
   return (
     <svg
