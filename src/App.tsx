@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { loadGameData } from './data/loader'
 import { getChainItems, reachableTargets } from './engine/helpers'
-import { solve, type TargetOutput } from './engine/solve'
+import { solve, type PlanInput, type TargetOutput } from './engine/solve'
 import { BELT_TIERS, PIPE_TIERS, type Purity } from './engine/types'
 import Breakdown from './components/Breakdown'
 import Schematic, { type ViewMode } from './components/Schematic'
@@ -29,9 +29,11 @@ interface PersistedState {
   pipeMk: number
   outputs: OutputRow[]
   selection: Record<string, string>
-  sinkOverflow: boolean
+  buildMode: BuildMode
   viewMode: ViewMode
 }
+
+type BuildMode = NonNullable<PlanInput['buildMode']>
 
 const PURITIES: Purity[] = ['impure', 'normal', 'pure']
 const STORAGE_KEY = 'ficsit-planner-v2'
@@ -50,7 +52,7 @@ function defaults(): PersistedState {
     pipeMk: 1,
     outputs: [{ key: 1, item: 'Desc_IronPlate_C', rate: '' }],
     selection: {},
-    sinkOverflow: false,
+    buildMode: 'exact',
     viewMode: 'standard',
   }
 }
@@ -75,7 +77,7 @@ export default function App() {
   const [selection, setSelection] = useState<Record<string, string>>(
     initial.selection,
   )
-  const [sinkOverflow, setSinkOverflow] = useState(initial.sinkOverflow)
+  const [buildMode, setBuildMode] = useState<BuildMode>(initial.buildMode)
   const [viewMode, setViewMode] = useState<ViewMode>(initial.viewMode)
 
   // Keys unique across nodes and outputs, seeded past whatever we loaded.
@@ -101,7 +103,7 @@ export default function App() {
       pipeMk,
       outputs,
       selection,
-      sinkOverflow,
+      buildMode,
       viewMode,
     }
     try {
@@ -109,7 +111,7 @@ export default function App() {
     } catch {
       /* storage unavailable — planning still works in-memory */
     }
-  }, [nodes, minerTier, beltMk, pipeMk, outputs, selection, sinkOverflow, viewMode])
+  }, [nodes, minerTier, beltMk, pipeMk, outputs, selection, buildMode, viewMode])
 
   const targetOptions = useMemo(() => {
     const ids = reachableTargets(
@@ -156,24 +158,32 @@ export default function App() {
         pipeMk,
         targets,
         recipeSelection: selection,
-        sinkOverflow,
+        // Whole-machine plans always sink their overflow; exact plans have
+        // nothing but byproducts to sink, so they just report them.
+        sinkOverflow: buildMode === 'whole',
+        buildMode,
       }),
-    [nodes, minerTier, beltMk, pipeMk, targets, selection, sinkOverflow],
+    [nodes, minerTier, beltMk, pipeMk, targets, selection, buildMode],
   )
 
-  // Max sustainable rate hint (only meaningful for a single output).
-  const maxRate = useMemo(() => {
-    if (outputs.length !== 1) return null
+  // Balanced max for the current set of items, solved with every rate blank so
+  // it stays visible (and stays the max) while you dial a number in.
+  const maxRates = useMemo(() => {
+    const rates = new Map<string, number>()
     const r = solve(data, {
       nodes,
       minerTier,
       beltMk,
       pipeMk,
-      targets: [{ item: outputs[0].item }],
+      targets: outputs.map((o) => ({ item: o.item })),
       recipeSelection: selection,
+      buildMode,
     })
-    return r.ok ? r.plan.targets[0].rate : null
-  }, [nodes, minerTier, beltMk, pipeMk, outputs, selection])
+    if (r.ok) {
+      for (const t of r.plan.targets) rates.set(t.item, t.rate)
+    }
+    return rates
+  }, [nodes, minerTier, beltMk, pipeMk, outputs, selection, buildMode])
 
   const updateNode = (key: number, patch: Partial<NodeRow>) =>
     setNodes((ns) => ns.map((n) => (n.key === key ? { ...n, ...patch } : n)))
@@ -188,7 +198,7 @@ export default function App() {
     setPipeMk(d.pipeMk)
     setOutputs(d.outputs)
     setSelection(d.selection)
-    setSinkOverflow(d.sinkOverflow)
+    setBuildMode(d.buildMode)
     setViewMode(d.viewMode)
     setNextKey(2)
     try {
@@ -335,7 +345,8 @@ export default function App() {
           <h2 className="eyebrow">Production targets</h2>
           <p className="recipe-note">
             Add one or more outputs. Shared intermediates are produced once and
-            split. Leave the rate blank (single output only) to plan the max.
+            split. Leave every rate blank to let the planner balance the outputs
+            against each other and push them to the max your nodes sustain.
           </p>
           {outputs.map((o) => (
             <div className="output-row" key={o.key}>
@@ -350,17 +361,17 @@ export default function App() {
                   </option>
                 ))}
               </select>
+              <span className="rate-hint">
+                {maxRates.has(o.item)
+                  ? `MAX ${fmt(maxRates.get(o.item)!)}/min`
+                  : ' '}
+              </span>
               <input
                 aria-label="Output rate per minute"
                 type="number"
                 min={0}
                 step="any"
                 value={o.rate}
-                placeholder={
-                  outputs.length === 1 && maxRate != null
-                    ? `max ${fmt(maxRate)}`
-                    : '/min'
-                }
                 onChange={(e) => updateOutput(o.key, { rate: e.target.value })}
               />
               <button
@@ -380,7 +391,7 @@ export default function App() {
             onClick={() =>
               setOutputs((os) => [
                 ...os,
-                { key: takeKey(), item: targetOptions[0]?.id ?? '', rate: '10' },
+                { key: takeKey(), item: targetOptions[0]?.id ?? '', rate: '' },
               ])
             }
           >
@@ -390,20 +401,25 @@ export default function App() {
 
         <section>
           <h2 className="eyebrow">Overflow</h2>
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={sinkOverflow}
-              onChange={(e) => setSinkOverflow(e.target.checked)}
-            />
-            <span>
-              Smart Splitter + AWESOME Sink combo
-              <small>
-                Route solid byproduct overflow into AWESOME Sinks for coupon
-                points instead of leaving it as surplus.
-              </small>
-            </span>
-          </label>
+          <div className="segmented">
+            <button
+              className={buildMode === 'exact' ? 'active' : ''}
+              onClick={() => setBuildMode('exact')}
+            >
+              Exact
+            </button>
+            <button
+              className={buildMode === 'whole' ? 'active' : ''}
+              onClick={() => setBuildMode('whole')}
+            >
+              Whole machines
+            </button>
+          </div>
+          <p className="recipe-note">
+            {buildMode === 'exact'
+              ? 'Every stage underclocks its last machine, so the chain produces exactly the demand. Only byproducts are left over, reported as surplus.'
+              : 'No underclocking anywhere: machines and miners are rounded up and all run at 100%, the way factories are usually built. Every stage overproduces, and a Smart Splitter routes that overflow into AWESOME Sinks for coupon points. Fluids are never sinkable and stay as surplus.'}
+          </p>
         </section>
 
         <section>

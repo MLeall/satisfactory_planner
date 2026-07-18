@@ -8,13 +8,13 @@ Para cada estágio ele resolve quantas máquinas construir, o clock da máquina 
 
 O planejador é **target-driven**: você informa a taxa de saída desejada e ele dimensiona toda a fábrica para atingi-la, reportando máquinas, energia, extratores e recursos brutos necessários. Os nós declarados (com pureza e quantidade) definem a capacidade disponível; se a taxa pedida exceder o que os nós sustentam, o app aponta o recurso que falta e o quanto.
 
-Com **um único output**, deixar a taxa em branco cai no modo **supply-driven**: o planejador calcula o máximo que os nós sustentam, identificando o recurso mais escasso (menor razão entre oferta e demanda) como limitante.
+Deixando **todas as taxas em branco** ele cai no modo **supply-driven**: calcula o máximo que os nós sustentam, identificando o recurso mais escasso (menor razão entre oferta e demanda) como limitante. Com vários outputs em branco, o planejador **balanceia** entre eles: cada output é pesado pelo quanto produziria sozinho com os nós declarados, e todos são escalados pelo mesmo fator até o recurso mais apertado acabar. Assim cada output recebe a mesma fração do seu potencial individual, e outputs que não disputam recurso nenhum saem ambos no máximo.
 
 Fluxo de uso:
 
 1. Adicione nós de recurso (tipo, pureza, quantidade).
 2. Escolha os tiers de logística (miner, esteira, cano).
-3. Adicione um ou mais itens de saída, cada um com sua taxa (só aparecem itens produzíveis a partir dos seus nós). Com um único output, a taxa pode ficar em branco para o máximo sustentável.
+3. Adicione um ou mais itens de saída, cada um com sua taxa (só aparecem itens produzíveis a partir dos seus nós). Deixe todas as taxas em branco para o máximo sustentável, balanceado entre os outputs. Misturar taxa preenchida com taxa em branco é erro: ou você dita todas, ou deixa o planejador dimensionar todas.
 4. Opcionalmente, troque receitas padrão por alternadas; a cadeia rebalanceia na hora.
 5. Veja o esquema visual e o detalhamento por estágio.
 
@@ -23,7 +23,8 @@ Todas as informações ficam salvas no `localStorage` do navegador entre sessõe
 ## Funcionalidades
 
 - **Múltiplos outputs**: cada item de saída ganha seu próprio Storage Container. Intermediários compartilhados (ex.: um ingot que alimenta placas e parafusos ao mesmo tempo) são produzidos uma vez só e divididos, refletido tanto no floor plan quanto no breakdown.
-- **Smart Splitter + AWESOME Sink combo**: modo opcional que roteia o overflow de subprodutos **sólidos** para AWESOME Sinks, elimina o excedente e soma os pontos de cupom gerados por minuto. Fluidos não são sinkáveis (restrição do jogo) e continuam reportados como surplus.
+- **Modo de construção Exact ou Whole machines**: em *Exact* cada estágio underclocka sua última máquina, então a cadeia produz exatamente a demanda e só subprodutos sobram. Em *Whole machines* não há underclock em lugar nenhum: máquinas de produção e extratores são arredondados para cima e rodam todos a 100%, como fábricas costumam ser construídas de fato. Cada estágio passa a sobreproduzir, a mineradora engatada entrega a taxa cheia do nó, e todo esse excesso é o overflow. Apenas os extratores necessários são construídos; nós sobrando ficam intocados. No modo target-driven o storage continua recebendo a taxa pedida e o excedente vai para o overflow; no modo supply-driven o excedente do estágio final vai para o storage, já que ali você pediu o máximo.
+- **Smart Splitter + AWESOME Sink**: em *Whole machines* o overflow **sólido** é sempre roteado para AWESOME Sinks, que eliminam o excedente e somam os pontos de cupom por minuto. Não é um toggle separado: overflow e sink andam juntos, já que sobreproduzir sem destino não faz sentido. Fluidos não são sinkáveis (restrição do jogo) e continuam reportados como surplus. Em *Exact* não há o que sinkar além de subproduto, então eles ficam como surplus.
 - **Duas visões do floor plan**:
   - *Standard*: compacta, máquinas agrupadas por estágio com a contagem.
   - *Complex*: cada máquina desenhada individualmente, com os belts ligando através de Splitters e Mergers.

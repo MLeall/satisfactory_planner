@@ -35,6 +35,14 @@ export interface PlanInput {
   recipeSelection?: Record<ItemId, RecipeId>
   /** Route sinkable surplus into AWESOME Sinks for coupon points. */
   sinkOverflow?: boolean
+  /**
+   * `exact` (default) underclocks the fractional machine of every stage, so the
+   * chain produces precisely the demand and nothing overflows. `whole` rounds
+   * every stage up to whole machines running at 100%, the way factories are
+   * usually built; each stage then overproduces and the excess becomes surplus
+   * (and coupon points when `sinkOverflow` is on).
+   */
+  buildMode?: 'exact' | 'whole'
 }
 
 export interface Flow {
@@ -120,31 +128,42 @@ interface NodeGroup {
 }
 
 /** Minimal extractors to cover `required`, engaging the most productive nodes
- * first and underclocking only the last (fractional) one. */
+ * first. In exact mode the last one is underclocked to the remainder, so the
+ * extracted rate matches `required`; in whole mode every engaged extractor
+ * runs at 100% and the surplus ore becomes overflow. */
 function fillExtractors(
   required: number,
   groups: NodeGroup[],
-): { count: number; built: number; lastClock: number } {
+  wholeOnly: boolean,
+): { count: number; built: number; lastClock: number; extracted: number } {
   let remaining = required
   let whole = 0
   let frac = 0
+  let extracted = 0
   for (const g of [...groups].sort((a, b) => b.perExtractor - a.perExtractor)) {
     if (remaining <= EPS) break
     const units = remaining / g.perExtractor
     if (units >= g.count - EPS) {
       whole += g.count
+      extracted += g.count * g.perExtractor
       remaining -= g.count * g.perExtractor
+    } else if (wholeOnly) {
+      const engaged = Math.max(1, Math.ceil(units - EPS))
+      whole += engaged
+      extracted += engaged * g.perExtractor
+      remaining = 0
     } else {
       const w = Math.floor(units + EPS)
       whole += w
       frac = (remaining - w * g.perExtractor) / g.perExtractor
+      extracted += remaining
       remaining = 0
     }
   }
   const count = whole + frac
   return frac > EPS
-    ? { count, built: whole + 1, lastClock: frac * 100 }
-    : { count, built: whole, lastClock: 100 }
+    ? { count, built: whole + 1, lastClock: frac * 100, extracted }
+    : { count, built: whole, lastClock: 100, extracted }
 }
 
 export function solve(data: GameData, input: PlanInput): SolveResult {
@@ -207,21 +226,52 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
 
   const consumersFirst = [...postOrder].reverse()
 
-  /** Propagate item demand top-down through the chosen recipes. */
-  const propagate = (seed: Map<ItemId, number>): Map<ItemId, number> => {
-    const demand = new Map(seed)
+  const wholeMode = input.buildMode === 'whole'
+
+  interface Propagation {
+    /** Rate each item must supply to its consumers (targets included) */
+    need: Map<ItemId, number>
+    /** Rate each crafted item is actually produced at (>= need in whole mode) */
+    made: Map<ItemId, number>
+    /** Recipe runs per minute, per crafted item */
+    runs: Map<ItemId, number>
+  }
+
+  /** Propagate item demand top-down through the chosen recipes. In whole mode
+   * every stage is rounded up to entire machines first, so its ingredient pull
+   * reflects what those machines really consume at 100%. */
+  const propagate = (seed: Map<ItemId, number>, whole = wholeMode): Propagation => {
+    const need = new Map(seed)
+    const made = new Map<ItemId, number>()
+    const runs = new Map<ItemId, number>()
     for (const id of consumersFirst) {
       const recipe = recipeFor.get(id)
       if (!recipe) continue
-      const d = demand.get(id) ?? 0
+      const d = need.get(id) ?? 0
       if (d <= EPS) continue
       const prodAmount = recipe.products.find((p) => p.item === id)!.amount
-      const runs = d / prodAmount
+      let r = d / prodAmount
+      if (whole) {
+        const perMachineRuns = 60 / recipe.time
+        // A stage with any demand at all still needs a whole machine.
+        r = Math.max(1, Math.ceil(r / perMachineRuns - EPS)) * perMachineRuns
+      }
+      runs.set(id, r)
+      made.set(id, r * prodAmount)
       for (const ing of recipe.ingredients) {
-        demand.set(ing.item, (demand.get(ing.item) ?? 0) + runs * ing.amount)
+        need.set(ing.item, (need.get(ing.item) ?? 0) + r * ing.amount)
       }
     }
-    return demand
+    return { need, made, runs }
+  }
+
+  /** Node resources consumed per unit of `item`, ignoring machine rounding. */
+  const rawPerUnit = (item: ItemId): Map<ItemId, number> => {
+    const perUnit = new Map<ItemId, number>()
+    for (const [id, v] of propagate(new Map([[item, 1]]), false).need) {
+      if (isRaw(id) && !isWater(id) && v > EPS) perUnit.set(id, v)
+    }
+    return perUnit
   }
 
   // --- 2. Node supply -------------------------------------------------------
@@ -258,33 +308,80 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
   const targetRates = new Map<ItemId, number>()
   let limitingResource: ItemId | null = null
 
-  const singleMax =
-    input.targets.length === 1 &&
-    (input.targets[0].rate === undefined || input.targets[0].rate <= EPS)
+  // Max mode: every rate left blank. Each target is weighted by what it would
+  // produce on its own from these nodes, then all of them are scaled by the
+  // same factor k until the tightest resource runs out. With a single target
+  // this degenerates to k = 1, i.e. plain solo max.
+  const balanced = input.targets.every(
+    (t) => t.rate === undefined || t.rate <= EPS,
+  )
 
-  if (singleMax) {
-    // Max mode: scale the single target to the tightest supply/demand ratio.
-    const tItem = input.targets[0].item
-    const perUnit = propagate(new Map([[tItem, 1]]))
-    let maxRate = Infinity
-    for (const [id, pu] of perUnit) {
-      if (!isRaw(id) || isWater(id) || pu <= EPS) continue
-      const available = supply.get(id) ?? 0
-      if (available <= EPS) {
-        errors.push(`No node supplies ${itemName(id)}. Add a node for it.`)
-        continue
+  if (balanced) {
+    const perUnit = new Map<ItemId, Map<ItemId, number>>()
+    const weights = new Map<ItemId, number>()
+    for (const t of input.targets) {
+      const pu = rawPerUnit(t.item)
+      let soloMax = Infinity
+      for (const [id, v] of pu) {
+        const available = supply.get(id) ?? 0
+        if (available <= EPS) {
+          errors.push(`No node supplies ${itemName(id)}. Add a node for it.`)
+          continue
+        }
+        soloMax = Math.min(soloMax, available / v)
       }
-      const ratio = available / pu
-      if (ratio < maxRate) {
-        maxRate = ratio
-        limitingResource = id
+      if (errors.length === 0 && !Number.isFinite(soloMax)) {
+        return fail('The chain consumes no node resource. Add a resource node.')
       }
+      perUnit.set(t.item, pu)
+      weights.set(t.item, (weights.get(t.item) ?? 0) + soloMax)
     }
     if (errors.length > 0) return fail(...errors)
-    if (!Number.isFinite(maxRate)) {
-      return fail('The chain consumes no node resource. Add a resource node.')
+
+    // Raw draw per unit of k, summed over the weighted targets.
+    const perK = new Map<ItemId, number>()
+    for (const [item, w] of weights) {
+      for (const [raw, v] of perUnit.get(item)!) {
+        perK.set(raw, (perK.get(raw) ?? 0) + w * v)
+      }
     }
-    targetRates.set(tItem, maxRate)
+    let k = Infinity
+    for (const [raw, v] of perK) {
+      const ratio = (supply.get(raw) ?? 0) / v
+      if (ratio < k) {
+        k = ratio
+        limitingResource = raw
+      }
+    }
+
+    const seedFor = (kk: number) =>
+      new Map([...weights].map(([item, w]) => [item, kk * w]))
+    const fits = (kk: number) => {
+      for (const [id, v] of propagate(seedFor(kk)).need) {
+        if (!isRaw(id) || isWater(id) || v <= EPS) continue
+        if (v > (supply.get(id) ?? 0) + EPS) return false
+      }
+      return true
+    }
+    // Rounding up to whole machines only ever raises the raw draw, so the
+    // linear k above is an upper bound and feasibility is monotonic in k.
+    if (wholeMode && !fits(k)) {
+      let lo = 0
+      let hi = k
+      for (let i = 0; i < 60; i++) {
+        const mid = (lo + hi) / 2
+        if (fits(mid)) lo = mid
+        else hi = mid
+      }
+      k = lo
+      if (k <= EPS) {
+        return fail(
+          'Whole-machine mode needs at least one full machine per stage, and ' +
+            'your nodes cannot feed them. Add nodes or switch to exact mode.',
+        )
+      }
+    }
+    for (const [item, w] of weights) targetRates.set(item, k * w)
   } else {
     for (const t of input.targets) {
       if (t.rate === undefined || t.rate <= EPS) {
@@ -297,9 +394,22 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
   }
 
   // --- 4. Absolute demand + feasibility ------------------------------------
-  const demand = propagate(targetRates)
+  const prop = propagate(targetRates)
+  const demand = prop.need
 
-  if (!singleMax) {
+  // Whole-machine overproduction of a target goes to its own storage in max
+  // mode (you asked for as much as possible), not to the sink.
+  if (balanced) {
+    for (const [item, rate] of targetRates) {
+      const over = (prop.made.get(item) ?? 0) - (demand.get(item) ?? 0)
+      if (over > EPS) {
+        targetRates.set(item, rate + over)
+        demand.set(item, prop.made.get(item)!)
+      }
+    }
+  }
+
+  if (!balanced) {
     let tightest = Infinity
     for (const [id, need] of demand) {
       if (!isRaw(id) || isWater(id) || need <= EPS) continue
@@ -337,11 +447,10 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
   for (const id of postOrder) {
     const recipe = recipeFor.get(id)
     if (!recipe) continue
-    const itemRate = demand.get(id) ?? 0
-    if (itemRate <= EPS) continue
+    const runs = prop.runs.get(id) ?? 0 // recipe runs per minute
+    if (runs <= EPS) continue
 
     const prodAmount = recipe.products.find((p) => p.item === id)!.amount
-    const runs = itemRate / prodAmount // recipe runs per minute
     const perMachineRuns = 60 / recipe.time
     const count = runs / perMachineRuns
     const { built, lastClock } = splitMachines(count)
@@ -366,6 +475,13 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
         surplusMap.set(p.item, (surplusMap.get(p.item) ?? 0) + p.amount * runs)
         byproductSource.set(p.item, stageId)
       }
+    }
+    // Whole machines at 100% make more than the chain pulls; the excess is
+    // overflow, routed exactly like a byproduct.
+    const over = prodAmount * runs - (demand.get(id) ?? 0)
+    if (over > EPS) {
+      surplusMap.set(id, (surplusMap.get(id) ?? 0) + over)
+      byproductSource.set(id, stageId)
     }
 
     const stageDepth =
@@ -403,42 +519,53 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
   // Extractor stages for consumed node resources.
   for (const [resource, consumed] of demand) {
     if (!isRaw(resource) || consumed <= EPS) continue
+    const stageId = `extract:${resource}`
+    let ext: Extractor
+    let count: number
+    let built: number
+    let lastClock: number
+    let extracted: number
+
     if (isWater(resource)) {
-      const ext = data.waterExtractor
-      const count = consumed / ext.ratePerMin
-      const { built, lastClock } = splitMachines(count)
-      stages.push({
-        id: `extract:${resource}`,
-        kind: 'extractor',
-        machineId: ext.id,
-        machineName: ext.name,
-        count,
-        machinesBuilt: built,
-        lastClockPercent: lastClock,
-        powerMW: stagePower(count, ext.power, DEFAULT_POWER_EXPONENT),
-        inputs: [],
-        outputs: [{ item: resource, rate: consumed }],
-        depth: 0,
-      })
+      ext = data.waterExtractor
+      count = consumed / ext.ratePerMin
+      if (wholeMode) count = Math.max(1, Math.ceil(count - EPS))
+      const split = splitMachines(count)
+      built = split.built
+      lastClock = split.lastClock
+      extracted = wholeMode ? count * ext.ratePerMin : consumed
     } else {
-      const ext = extractorFor(resource)!
-      const { count, built, lastClock } = fillExtractors(
+      ext = extractorFor(resource)!
+      const filled = fillExtractors(
         consumed,
         nodeGroups.get(resource) ?? [],
+        wholeMode,
       )
-      stages.push({
-        id: `extract:${resource}`,
-        kind: 'extractor',
-        machineId: ext.id,
-        machineName: ext.name,
-        count,
-        machinesBuilt: built,
-        lastClockPercent: lastClock,
-        powerMW: stagePower(count, ext.power, DEFAULT_POWER_EXPONENT),
-        inputs: [],
-        outputs: [{ item: resource, rate: consumed }],
-        depth: 0,
-      })
+      count = filled.count
+      built = filled.built
+      lastClock = filled.lastClock
+      extracted = filled.extracted
+    }
+
+    stages.push({
+      id: stageId,
+      kind: 'extractor',
+      machineId: ext.id,
+      machineName: ext.name,
+      count,
+      machinesBuilt: built,
+      lastClockPercent: lastClock,
+      powerMW: stagePower(count, ext.power, DEFAULT_POWER_EXPONENT),
+      inputs: [],
+      outputs: [{ item: resource, rate: extracted }],
+      depth: 0,
+    })
+
+    // Extractors at 100% pull more than the chain consumes; that is overflow.
+    const over = extracted - consumed
+    if (over > EPS) {
+      surplusMap.set(resource, (surplusMap.get(resource) ?? 0) + over)
+      byproductSource.set(resource, stageId)
     }
   }
 

@@ -196,12 +196,39 @@ button:focus-visible {
 .output-row {
   display: grid;
   grid-template-columns: 1fr 72px 26px;
-  gap: 6px;
+  grid-template-rows: auto auto;
+  gap: 0 6px;
   margin-bottom: 8px;
-  align-items: center;
+  align-items: end;
+}
+
+/* Max-rate hint: above the rate input, centred over it and the remove button. */
+.rate-hint {
+  grid-row: 1;
+  grid-column: 2 / 4;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  line-height: 1.2;
+  min-height: 16px;
+  margin-bottom: 6px;
+  white-space: nowrap;
+}
+
+.output-row select {
+  grid-row: 2;
+  grid-column: 1;
+}
+
+.output-row input {
+  grid-row: 2;
+  grid-column: 2;
 }
 
 .output-row .remove {
+  grid-row: 2;
+  grid-column: 3;
   background: none;
   border: 1px solid var(--steel-600);
   border-radius: 3px;

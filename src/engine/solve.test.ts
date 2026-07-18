@@ -556,6 +556,231 @@ describe('solve: AWESOME Sink overflow mode', () => {
   })
 })
 
+describe('solve: balanced multi-output max', () => {
+  // plate: 1.5 ore each -> solo max 40/min from a 60/min node
+  // widget: 2 ore each   -> solo max 30/min from the same node
+  // weights 40 and 30 -> k = 60 / (40*1.5 + 30*2) = 0.5 -> 20 plate, 15 widget
+  const result = solve(fixture(), {
+    ...base,
+    nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+    targets: [{ item: 'plate' }, { item: 'widget' }],
+  })
+
+  it('succeeds with every rate left blank', () => {
+    expect(result.ok).toBe(true)
+  })
+  if (!result.ok) return
+  const plan = result.plan
+  const rateOf = (item: string) =>
+    plan.targets.find((t) => t.item === item)!.rate
+
+  it('splits the supply proportionally to each solo max', () => {
+    expect(rateOf('plate')).toBeCloseTo(20, 6)
+    expect(rateOf('widget')).toBeCloseTo(15, 6)
+  })
+
+  it('gives every output the same fraction of its solo potential', () => {
+    expect(rateOf('plate') / 40).toBeCloseTo(rateOf('widget') / 30, 6)
+  })
+
+  it('saturates the limiting resource without exceeding it', () => {
+    const ore = plan.stages.find((s) => s.kind === 'extractor')!
+    expect(ore.outputs[0].rate).toBeCloseTo(60, 6)
+    expect(plan.limitingResource).toBe('ore-iron')
+  })
+
+  it('still gives the plain solo max for a single blank output', () => {
+    const single = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      targets: [{ item: 'plate' }],
+    })
+    expect(single.ok).toBe(true)
+    if (!single.ok) return
+    expect(single.plan.targets[0].rate).toBeCloseTo(40, 6)
+  })
+
+  it('weighs outputs that do not compete for the same resource', () => {
+    // alloy needs copper too; with copper scarce it drags alloy's weight down.
+    const mixed = solve(fixture(), {
+      ...base,
+      nodes: [
+        { resource: 'ore-iron', purity: 'normal', count: 1 }, // 60/min
+        { resource: 'ore-copper', purity: 'impure', count: 1 }, // 30/min
+      ],
+      targets: [{ item: 'plate' }, { item: 'alloy' }],
+    })
+    expect(mixed.ok).toBe(true)
+    if (!mixed.ok) return
+    const alloy = mixed.plan.targets.find((t) => t.item === 'alloy')!.rate
+    const plate = mixed.plan.targets.find((t) => t.item === 'plate')!.rate
+    // solo maxes: plate 40 (iron), alloy 15 (copper-limited)
+    // iron: 40*1.5 + 15*2 = 90k <= 60 ; copper: 15*2 = 30k <= 30
+    // k = min(60/90, 30/30) = 2/3 -> plate 26.67, alloy 10
+    expect(plate).toBeCloseTo(80 / 3, 6)
+    expect(alloy).toBeCloseTo(10, 6)
+  })
+})
+
+describe('solve: whole-machine build mode', () => {
+  const nodes = [{ resource: 'ore-iron' as const, purity: 'normal' as const, count: 1 }]
+
+  it('underclocks and leaves no overflow in exact mode', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes,
+      targets: [{ item: 'plate', rate: 20 }],
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const plate = result.plan.stages.find((s) => s.recipeId === 'r-plate')!
+    expect(plate.count).toBeCloseTo(2 / 3, 6)
+    expect(plate.lastClockPercent).toBeCloseTo(200 / 3, 6)
+    expect(result.plan.surplus).toHaveLength(0)
+  })
+
+  it('rounds every stage up to whole machines at 100% clock', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes,
+      targets: [{ item: 'plate', rate: 20 }],
+      buildMode: 'whole',
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const plate = result.plan.stages.find((s) => s.recipeId === 'r-plate')!
+    const ingot = result.plan.stages.find((s) => s.recipeId === 'r-ingot')!
+    // 20 plate -> 10 runs -> 0.67 machine -> 1 machine at 100% -> 30 plate
+    expect(plate.machinesBuilt).toBe(1)
+    expect(plate.lastClockPercent).toBe(100)
+    // 1 plate machine eats 45 ingot -> 1.5 smelters -> 2 at 100% -> 60 ingot
+    expect(ingot.machinesBuilt).toBe(2)
+    expect(ingot.lastClockPercent).toBe(100)
+  })
+
+  it('reports the overproduction of every stage as surplus', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes,
+      targets: [{ item: 'plate', rate: 20 }],
+      buildMode: 'whole',
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const surplus = new Map(result.plan.surplus.map((s) => [s.item, s.rate]))
+    expect(surplus.get('plate')).toBeCloseTo(10, 6) // 30 made, 20 requested
+    expect(surplus.get('ingot')).toBeCloseTo(15, 6) // 60 made, 45 consumed
+  })
+
+  it('feeds that overflow into the AWESOME Sink', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes,
+      targets: [{ item: 'plate', rate: 20 }],
+      buildMode: 'whole',
+      sinkOverflow: true,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // 10 plate * 6 pts + 15 ingot * 2 pts = 90 pts/min
+    expect(result.plan.sinkPointsPerMin).toBeCloseTo(90, 6)
+    expect(result.plan.stages.some((s) => s.id === 'sink:plate')).toBe(true)
+    expect(result.plan.stages.some((s) => s.id === 'sink:ingot')).toBe(true)
+    // Storage still receives exactly what was asked for.
+    expect(
+      result.plan.edges.find((e) => e.to === 'storage:plate')!.rate,
+    ).toBeCloseTo(20, 6)
+  })
+
+  it('keeps the sink idle in exact mode (the bug this mode fixes)', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes,
+      targets: [{ item: 'plate', rate: 20 }],
+      sinkOverflow: true,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.plan.sinkPointsPerMin).toBe(0)
+  })
+
+  it('lowers the max rate so the rounded-up chain still fits the nodes', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes,
+      targets: [{ item: 'plate' }],
+      buildMode: 'whole',
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // Exact mode reaches 40/min, but 2 plate machines would need 90 ore.
+    // 1 plate machine (30/min) with 2 smelters consumes exactly 60 ore.
+    expect(result.plan.targets[0].rate).toBeCloseTo(30, 4)
+    const ore = result.plan.stages.find((s) => s.kind === 'extractor')!
+    expect(ore.outputs[0].rate).toBeCloseTo(60, 4)
+  })
+
+  it('underclocks extractors in exact mode', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes,
+      targets: [{ item: 'ingot', rate: 20 }],
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const ore = result.plan.stages.find((s) => s.kind === 'extractor')!
+    expect(ore.count).toBeCloseTo(20 / 60, 6)
+    expect(ore.outputs[0].rate).toBeCloseTo(20, 6)
+  })
+
+  it('runs extractors whole at 100% and overflows the extra ore', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes,
+      targets: [{ item: 'ingot', rate: 20 }],
+      buildMode: 'whole',
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // 20 ingot -> 1 smelter at 100% -> 30 ingot -> 30 ore pulled,
+    // but a whole miner on a normal node yields its full 60/min.
+    const ore = result.plan.stages.find((s) => s.kind === 'extractor')!
+    expect(ore.machinesBuilt).toBe(1)
+    expect(ore.lastClockPercent).toBe(100)
+    expect(ore.count).toBe(1)
+    expect(ore.outputs[0].rate).toBeCloseTo(60, 6)
+    expect(ore.powerMW).toBeCloseTo(5, 6) // full power, no underclock discount
+    const surplus = new Map(result.plan.surplus.map((s) => [s.item, s.rate]))
+    expect(surplus.get('ore-iron')).toBeCloseTo(30, 6)
+    expect(surplus.get('ingot')).toBeCloseTo(10, 6)
+  })
+
+  it('engages only the extractors it needs, each at full rate', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 3 }], // 180/min
+      targets: [{ item: 'ingot', rate: 20 }],
+      buildMode: 'whole',
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const ore = result.plan.stages.find((s) => s.kind === 'extractor')!
+    expect(ore.machinesBuilt).toBe(1) // 2 idle nodes stay unbuilt
+    expect(ore.outputs[0].rate).toBeCloseTo(60, 6)
+  })
+
+  it('errors when the nodes cannot feed one machine per stage', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'impure', count: 1 }], // 30/min
+      targets: [{ item: 'plate' }],
+      buildMode: 'whole',
+    })
+    // 1 plate machine needs 45 ingot -> 2 smelters -> 60 ore > 30 available
+    expect(result.ok).toBe(false)
+  })
+})
+
 describe('solve: raw resource as target', () => {
   it('plans miners straight into storage', () => {
     const result = solve(fixture(), {
