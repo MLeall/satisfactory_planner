@@ -10,7 +10,13 @@ import {
   zoomAt,
   type View,
 } from '../ui/viewport'
-import Schematic, { layoutSize, type ViewMode } from './Schematic'
+import {
+  moveBox,
+  pruneLayout,
+  type ManualLayout,
+  type Point,
+} from '../ui/manualLayout'
+import Schematic, { boxKeys, layoutSize, type ViewMode } from './Schematic'
 
 interface Props {
   plan: Plan
@@ -18,6 +24,10 @@ interface Props {
   beltMk: number
   pipeMk: number
   viewMode: ViewMode
+  /** Owned by the app, not by this component: an invalid input swaps the whole
+   * viewport for the error panel, and state living here would die with it. */
+  layout: ManualLayout
+  onLayoutChange: (next: ManualLayout) => void
 }
 
 const WHEEL_STEP = 1.12
@@ -34,6 +44,8 @@ export default function SchematicViewport({
   beltMk,
   pipeMk,
   viewMode,
+  layout,
+  onLayoutChange,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const size = useMemo(() => layoutSize(plan, viewMode), [plan, viewMode])
@@ -46,6 +58,23 @@ export default function SchematicViewport({
   const [filled, setFilled] = useState(false)
   // Once the user pans or zooms, stop re-fitting under them on every resize.
   const touched = useRef(false)
+
+  // Replanning keeps whatever the user arranged, as long as the box is still
+  // drawn: changing only an output rate leaves every box in place, while a
+  // different chain drops the boxes it no longer has.
+  const keys = useMemo(() => boxKeys(plan, viewMode), [plan, viewMode])
+  const layoutRef = useRef(layout)
+  layoutRef.current = layout
+  useEffect(() => {
+    const pruned = pruneLayout(layoutRef.current, keys)
+    if (pruned !== layoutRef.current) onLayoutChange(pruned)
+  }, [keys, onLayoutChange])
+
+  const onMoveBox = useCallback(
+    (key: string, auto: Point, dx: number, dy: number) =>
+      onLayoutChange(moveBox(layoutRef.current, key, auto, dx, dy)),
+    [onLayoutChange],
+  )
 
   const fit = useCallback(() => {
     touched.current = false
@@ -165,6 +194,9 @@ export default function SchematicViewport({
         pipeMk={pipeMk}
         viewMode={viewMode}
         viewBox={viewBox(view, box.w, box.h)}
+        layout={layout}
+        onMoveBox={onMoveBox}
+        scale={view.zoom}
       />
       <div className="viewport-controls">
         <button
@@ -186,6 +218,15 @@ export default function SchematicViewport({
         <button onClick={fit} title="Fit to screen" aria-label="Fit to screen">
           ⤢
         </button>
+        {Object.keys(layout).length > 0 && (
+          <button
+            onClick={() => onLayoutChange({})}
+            title="Undo my arrangement"
+            aria-label="Reset arrangement"
+          >
+            ↺
+          </button>
+        )}
         <button
           onClick={toggleFullscreen}
           title={expanded ? 'Exit fullscreen' : 'Fullscreen'}

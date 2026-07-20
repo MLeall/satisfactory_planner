@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
-import Schematic, { layoutSize } from './Schematic'
+import Schematic, { boxKeys, layoutSize } from './Schematic'
 import Breakdown from './Breakdown'
 import { loadGameData } from '../data/loader'
 import { solve } from '../engine/solve'
@@ -81,6 +81,35 @@ describe('layoutSize', () => {
     expect(layoutSize(branching, 'complex').height).toBeGreaterThan(
       layoutSize(branching, 'standard').height,
     )
+  })
+})
+
+describe('manual layout', () => {
+  const branching = plan([{ item: 'Desc_IronPlateReinforced_C', rate: 10 }])
+
+  it('draws a box where the user dragged it', () => {
+    const key = [...boxKeys(branching, 'standard')][0]
+    const html = renderToStaticMarkup(
+      <Schematic
+        plan={branching}
+        data={data}
+        beltMk={5}
+        pipeMk={2}
+        viewMode="standard"
+        layout={{ [key]: { x: 777, y: 888 } }}
+      />,
+    )
+    expect(html).toContain('translate(777 888)')
+  })
+
+  it('keys standard boxes by stage and complex boxes by machine', () => {
+    const standard = boxKeys(branching, 'standard')
+    const complex = boxKeys(branching, 'complex')
+    // Stage ids are stable across replans, which is what makes a dragged
+    // position survive an output-rate change.
+    expect([...standard].every((k) => !k.includes('#'))).toBe(true)
+    expect([...complex].some((k) => k.includes('#'))).toBe(true)
+    expect(complex.size).toBeGreaterThan(standard.size)
   })
 })
 

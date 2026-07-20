@@ -342,6 +342,10 @@ button:focus-visible {
   display: block;
 }
 
+.stage--draggable {
+  cursor: move;
+}
+
 /* Fullscreen paints on the OS backdrop, which has none of our page styling. */
 .viewport--full {
   background-color: var(--steel-900);

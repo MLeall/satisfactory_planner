@@ -7,6 +7,7 @@ import Breakdown from './components/Breakdown'
 import type { ViewMode } from './components/Schematic'
 import SchematicViewport from './components/SchematicViewport'
 import { fmt } from './ui/format'
+import type { ManualLayout } from './ui/manualLayout'
 
 const data = loadGameData()
 
@@ -33,6 +34,7 @@ interface PersistedState {
   buildMode: BuildMode
   powerShards: PowerShards
   viewMode: ViewMode
+  layout: ManualLayout
 }
 
 type BuildMode = NonNullable<PlanInput['buildMode']>
@@ -66,6 +68,7 @@ function defaults(): PersistedState {
     buildMode: 'exact',
     powerShards: 0,
     viewMode: 'standard',
+    layout: {},
   }
 }
 
@@ -94,6 +97,7 @@ export default function App() {
     initial.powerShards,
   )
   const [viewMode, setViewMode] = useState<ViewMode>(initial.viewMode)
+  const [layout, setLayout] = useState<ManualLayout>(initial.layout)
 
   // Keys unique across nodes and outputs, seeded past whatever we loaded.
   const [nextKey, setNextKey] = useState(
@@ -121,6 +125,7 @@ export default function App() {
       buildMode,
       powerShards,
       viewMode,
+      layout,
     }
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
@@ -137,6 +142,7 @@ export default function App() {
     buildMode,
     powerShards,
     viewMode,
+    layout,
   ])
 
   const resources = useMemo(() => nodes.map((n) => n.resource), [nodes])
@@ -256,6 +262,7 @@ export default function App() {
     setBuildMode(d.buildMode)
     setPowerShards(d.powerShards)
     setViewMode(d.viewMode)
+    setLayout(d.layout)
     setNextKey(2)
     try {
       localStorage.removeItem(STORAGE_KEY)
@@ -562,6 +569,8 @@ export default function App() {
                 beltMk={beltMk}
                 pipeMk={pipeMk}
                 viewMode={viewMode}
+                layout={layout}
+                onLayoutChange={setLayout}
               />
             </div>
             <Breakdown plan={result.plan} data={data} />

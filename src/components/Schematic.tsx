@@ -1,6 +1,8 @@
+import { useRef } from 'react'
 import type { Plan, Stage } from '../engine/solve'
 import type { GameData } from '../engine/types'
 import { fmt } from '../ui/format'
+import type { ManualLayout, Point } from '../ui/manualLayout'
 
 export type ViewMode = 'standard' | 'complex'
 
@@ -13,6 +15,12 @@ interface Props {
   /** Pan/zoom window supplied by the viewport. Absent means draw at intrinsic
    * size, which is what the render tests and a plain static export want. */
   viewBox?: string
+  /** Boxes the user dragged somewhere else. */
+  layout?: ManualLayout
+  /** Drag report, in SVG units. Absent makes the schematic read-only. */
+  onMoveBox?: (key: string, auto: Point, dx: number, dy: number) => void
+  /** CSS pixels per SVG unit, to convert pointer deltas while dragging. */
+  scale?: number
 }
 
 /** Fill the container when the viewport drives the window, otherwise keep the
@@ -53,10 +61,18 @@ interface Grid {
   stages: { stage: Stage; units: Unit[] }[]
 }
 
+/** Stable identity for a drawn box, so a dragged position survives replanning
+ * as long as the box itself survives. The standard view draws one box per
+ * stage; the complex one draws a box per machine. */
+export const boxKey = (stageId: string, unit: number, multi: boolean) =>
+  multi ? `${stageId}#${unit}` : stageId
+
 function grid(
   plan: Plan,
   m: Metrics,
   unitCount: (s: Stage) => number,
+  multi: boolean,
+  layout: ManualLayout = {},
 ): Grid {
   const columns = new Map<number, Stage[]>()
   for (const stage of plan.stages) {
@@ -84,7 +100,11 @@ function grid(
     for (const stage of columns.get(d)!) {
       const units: Unit[] = []
       for (let i = 0; i < unitCount(stage); i++) {
-        units.push({ x, y })
+        const key = boxKey(stage.id, i, multi)
+        const auto = { x, y }
+        // A dragged box keeps its own spot; the automatic slot is still what a
+        // later drag measures from, so deltas stay absolute.
+        units.push({ key, auto, ...(layout[key] ?? auto) })
         y += m.h + m.ygap
       }
       unitsOf.set(stage.id, units)
@@ -94,6 +114,73 @@ function grid(
   return { width, height, unitsOf, stages }
 }
 
+/**
+ * A stage box the user can drag. Children draw relative to the box origin; the
+ * translate does the placing. Pointer capture keeps the drag alive past the box
+ * edge, and stopping propagation is what keeps a box drag from also panning the
+ * viewport underneath.
+ */
+function Draggable({
+  unit,
+  className,
+  scale = 1,
+  onMoveBox,
+  children,
+}: {
+  unit: Unit
+  className: string
+  scale?: number
+  onMoveBox?: Props['onMoveBox']
+  children: React.ReactNode
+}) {
+  const last = useRef<Point | null>(null)
+  const draggable = Boolean(onMoveBox)
+
+  return (
+    <g
+      className={`${className}${draggable ? ' stage--draggable' : ''}`}
+      transform={`translate(${unit.x} ${unit.y})`}
+      onPointerDown={
+        draggable
+          ? (e) => {
+              if (e.button !== 0) return
+              e.stopPropagation()
+              last.current = { x: e.clientX, y: e.clientY }
+              e.currentTarget.setPointerCapture(e.pointerId)
+            }
+          : undefined
+      }
+      onPointerMove={
+        draggable
+          ? (e) => {
+              const from = last.current
+              if (!from) return
+              e.stopPropagation()
+              onMoveBox!(
+                unit.key,
+                unit.auto,
+                (e.clientX - from.x) / scale,
+                (e.clientY - from.y) / scale,
+              )
+              last.current = { x: e.clientX, y: e.clientY }
+            }
+          : undefined
+      }
+      onPointerUp={
+        draggable
+          ? (e) => {
+              last.current = null
+              e.currentTarget.releasePointerCapture(e.pointerId)
+            }
+          : undefined
+      }
+      onPointerCancel={draggable ? () => void (last.current = null) : undefined}
+    >
+      {children}
+    </g>
+  )
+}
+
 /** Intrinsic size of the drawing, so the viewport can fit it before render. */
 export function layoutSize(
   plan: Plan,
@@ -101,9 +188,20 @@ export function layoutSize(
 ): { width: number; height: number } {
   const { width, height } =
     viewMode === 'complex'
-      ? grid(plan, COMPLEX, complexUnitCount)
-      : grid(plan, STANDARD, () => 1)
+      ? grid(plan, COMPLEX, complexUnitCount, true)
+      : grid(plan, STANDARD, () => 1, false)
   return { width, height }
+}
+
+/** Every box key the current plan draws, so stale overrides can be pruned. */
+export function boxKeys(plan: Plan, viewMode: ViewMode): Set<string> {
+  const multi = viewMode === 'complex'
+  const { unitsOf } = multi
+    ? grid(plan, COMPLEX, complexUnitCount, true)
+    : grid(plan, STANDARD, () => 1, false)
+  const keys = new Set<string>()
+  for (const units of unitsOf.values()) for (const u of units) keys.add(u.key)
+  return keys
 }
 
 // ---------------------------------------------------------------------------
@@ -118,10 +216,14 @@ function StandardSchematic(props: Props) {
   const { plan, data, beltMk, pipeMk } = props
   const itemName = (id: string) => data.items.get(id)?.name ?? id
 
-  const { width, height, unitsOf } = grid(plan, STANDARD, () => 1)
-  const pos = new Map(
-    [...unitsOf].map(([id, units]) => [id, units[0]] as const),
+  const { width, height, unitsOf } = grid(
+    plan,
+    STANDARD,
+    () => 1,
+    false,
+    props.layout,
   )
+  const pos = new Map([...unitsOf].map(([id, units]) => [id, units[0]] as const))
 
   const subLabel = (s: Stage): string => {
     if (s.kind === 'machine') return s.recipeName ?? ''
@@ -172,23 +274,26 @@ function StandardSchematic(props: Props) {
           </g>
         )
       })}
-      {plan.stages.map((s) => {
-        const p = pos.get(s.id)!
-        return (
-          <g key={s.id} className={`stage stage--${s.kind}`}>
-            <rect className="stage-box" x={p.x} y={p.y} width={W} height={H} rx={5} />
-            <text className="stage-count" x={p.x + 12} y={p.y + 26}>
-              {s.machinesBuilt}× {s.machineName}
-            </text>
-            <text className="stage-sub" x={p.x + 12} y={p.y + 47}>
-              {subLabel(s)}
-            </text>
-            <text className="stage-meta" x={p.x + 12} y={p.y + 70}>
-              {metaLabel(s)}
-            </text>
-          </g>
-        )
-      })}
+      {plan.stages.map((s) => (
+        <Draggable
+          key={s.id}
+          unit={pos.get(s.id)!}
+          className={`stage stage--${s.kind}`}
+          scale={props.scale}
+          onMoveBox={props.onMoveBox}
+        >
+          <rect className="stage-box" width={W} height={H} rx={5} />
+          <text className="stage-count" x={12} y={26}>
+            {s.machinesBuilt}× {s.machineName}
+          </text>
+          <text className="stage-sub" x={12} y={47}>
+            {subLabel(s)}
+          </text>
+          <text className="stage-meta" x={12} y={70}>
+            {metaLabel(s)}
+          </text>
+        </Draggable>
+      ))}
     </svg>
   )
 }
@@ -206,9 +311,10 @@ const NODE = 30 // splitter / merger square
 const complexUnitCount = (s: Stage) =>
   s.kind === 'storage' ? 1 : Math.max(1, s.machinesBuilt)
 
-interface Unit {
-  x: number
-  y: number
+interface Unit extends Point {
+  key: string
+  /** Where the automatic layout put it, before any drag */
+  auto: Point
 }
 
 interface CLink {
@@ -228,7 +334,7 @@ function ComplexSchematic(props: Props) {
     height,
     unitsOf,
     stages: stageMeta,
-  } = grid(plan, COMPLEX, complexUnitCount)
+  } = grid(plan, COMPLEX, complexUnitCount, true, props.layout)
 
   const centroidY = (units: Unit[]) =>
     units.reduce((sum, u) => sum + u.y + CH / 2, 0) / units.length
@@ -340,19 +446,25 @@ function ComplexSchematic(props: Props) {
       ))}
       {stageMeta.map(({ stage, units }) =>
         units.map((u, i) => (
-          <g key={`${stage.id}-${i}`} className={`stage stage--${stage.kind}`}>
-            <rect className="stage-box" x={u.x} y={u.y} width={CW} height={CH} rx={4} />
-            <text className="stage-count cx-title" x={u.x + 10} y={u.y + 19}>
+          <Draggable
+            key={u.key}
+            unit={u}
+            className={`stage stage--${stage.kind}`}
+            scale={props.scale}
+            onMoveBox={props.onMoveBox}
+          >
+            <rect className="stage-box" width={CW} height={CH} rx={4} />
+            <text className="stage-count cx-title" x={10} y={19}>
               {stage.machineName}
             </text>
-            <text className="stage-meta cx-meta" x={u.x + 10} y={u.y + 36}>
+            <text className="stage-meta cx-meta" x={10} y={36}>
               {stage.kind === 'storage'
                 ? itemName(stage.inputs[0].item)
                 : stage.kind === 'sink'
                   ? `${itemName(stage.inputs[0].item)} · sink`
                   : `${fmt(unitClock(stage, i, units.length))}%`}
             </text>
-          </g>
+          </Draggable>
         )),
       )}
     </svg>
