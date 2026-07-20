@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { loadGameData } from './data/loader'
-import { getChainItems, reachableTargets } from './engine/helpers'
+import { getChainItems, reachableTargets, reconcile } from './engine/helpers'
 import { solve, type PlanInput, type TargetOutput } from './engine/solve'
 import { BELT_TIERS, PIPE_TIERS, type Purity } from './engine/types'
 import Breakdown from './components/Breakdown'
@@ -138,20 +138,47 @@ export default function App() {
     viewMode,
   ])
 
+  const resources = useMemo(() => nodes.map((n) => n.resource), [nodes])
+
   const targetOptions = useMemo(() => {
-    const ids = reachableTargets(
-      data,
-      nodes.map((n) => n.resource),
-    )
-    return ids
+    return reachableTargets(data, resources)
       .map((id) => ({ id, name: data.items.get(id)?.name ?? id }))
       .sort((a, b) => a.name.localeCompare(b.name))
-  }, [nodes])
+  }, [resources])
+
+  // Editing the nodes can strand an output item or an alternate recipe that the
+  // remaining resources no longer reach. Reconcile first and plan off the
+  // cleaned values, so the schematic follows the inputs instead of stalling on
+  // an error until the user re-picks the recipe by hand.
+  const clean = useMemo(
+    () =>
+      reconcile(
+        data,
+        resources,
+        outputs.map((o) => o.item),
+        selection,
+      ),
+    [resources, outputs, selection],
+  )
+
+  useEffect(() => {
+    if (clean.selection !== selection) setSelection(clean.selection)
+    setOutputs((os) =>
+      os.some((o, i) => o.item !== clean.targets[i])
+        ? os.map((o, i) => ({ ...o, item: clean.targets[i] }))
+        : os,
+    )
+  }, [clean, selection])
+
+  const effectiveOutputs = useMemo(
+    () => outputs.map((o, i) => ({ ...o, item: clean.targets[i] })),
+    [outputs, clean],
+  )
 
   const recipeChoices = useMemo(() => {
     const ids = new Set<string>()
-    for (const o of outputs) {
-      for (const id of getChainItems(data, o.item, selection)) ids.add(id)
+    for (const o of effectiveOutputs) {
+      for (const id of getChainItems(data, o.item, clean.selection)) ids.add(id)
     }
     return [...ids]
       .map((id) => ({
@@ -161,17 +188,17 @@ export default function App() {
       }))
       .filter((c) => c.recipes.length > 1)
       .sort((a, b) => a.name.localeCompare(b.name))
-  }, [outputs, selection])
+  }, [effectiveOutputs, clean])
 
   const targets: TargetOutput[] = useMemo(
     () =>
-      outputs.map((o) => {
+      effectiveOutputs.map((o) => {
         const rate = Number(o.rate)
         return o.rate.trim() !== '' && rate > 0
           ? { item: o.item, rate }
           : { item: o.item }
       }),
-    [outputs],
+    [effectiveOutputs],
   )
 
   const result = useMemo(
@@ -182,14 +209,14 @@ export default function App() {
         beltMk,
         pipeMk,
         targets,
-        recipeSelection: selection,
+        recipeSelection: clean.selection,
         // Whole-machine plans always sink their overflow; exact plans have
         // nothing but byproducts to sink, so they just report them.
         sinkOverflow: buildMode === 'whole',
         buildMode,
         powerShards,
       }),
-    [nodes, minerTier, beltMk, pipeMk, targets, selection, buildMode, powerShards],
+    [nodes, minerTier, beltMk, pipeMk, targets, clean, buildMode, powerShards],
   )
 
   // Balanced max for the current set of items, solved with every rate blank so
@@ -201,8 +228,8 @@ export default function App() {
       minerTier,
       beltMk,
       pipeMk,
-      targets: outputs.map((o) => ({ item: o.item })),
-      recipeSelection: selection,
+      targets: effectiveOutputs.map((o) => ({ item: o.item })),
+      recipeSelection: clean.selection,
       buildMode,
       powerShards,
     })
@@ -210,7 +237,7 @@ export default function App() {
       for (const t of r.plan.targets) rates.set(t.item, t.rate)
     }
     return rates
-  }, [nodes, minerTier, beltMk, pipeMk, outputs, selection, buildMode, powerShards])
+  }, [nodes, minerTier, beltMk, pipeMk, effectiveOutputs, clean, buildMode, powerShards])
 
   const updateNode = (key: number, patch: Partial<NodeRow>) =>
     setNodes((ns) => ns.map((n) => (n.key === key ? { ...n, ...patch } : n)))
@@ -376,7 +403,7 @@ export default function App() {
             split. Leave every rate blank to let the planner balance the outputs
             against each other and push them to the max your nodes sustain.
           </p>
-          {outputs.map((o) => (
+          {effectiveOutputs.map((o) => (
             <div className="output-row" key={o.key}>
               <select
                 aria-label="Output item"
@@ -507,7 +534,7 @@ export default function App() {
                 <label htmlFor={`recipe-${c.id}`}>{c.name}</label>
                 <select
                   id={`recipe-${c.id}`}
-                  value={selection[c.id] ?? c.recipes[0].id}
+                  value={clean.selection[c.id] ?? c.recipes[0].id}
                   onChange={(e) =>
                     setSelection((s) => ({ ...s, [c.id]: e.target.value }))
                   }

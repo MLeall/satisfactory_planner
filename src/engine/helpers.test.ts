@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { reachableTargets, getChainItems } from './helpers'
+import { reachableTargets, getChainItems, reconcile } from './helpers'
 import { loadGameData } from '../data/loader'
 
 const data = loadGameData()
@@ -67,5 +67,79 @@ describe('getChainItems', () => {
     // Just needs to terminate and include the target
     const chain = getChainItems(data, 'Desc_Plastic_C', {})
     expect(chain).toContain('Desc_Plastic_C')
+  })
+})
+
+describe('reconcile', () => {
+  // Alternate: Iron Alloy Ingot needs iron ore AND copper ore.
+  const IRON_ALLOY = 'Recipe_Alternate_IngotIron_C'
+
+  it('keeps a selection whose ingredients are all still supplied', () => {
+    const { selection } = reconcile(
+      data,
+      ['Desc_OreIron_C', 'Desc_OreCopper_C'],
+      ['Desc_IronPlate_C'],
+      { Desc_IronIngot_C: IRON_ALLOY },
+    )
+    expect(selection).toEqual({ Desc_IronIngot_C: IRON_ALLOY })
+  })
+
+  it('drops a selection stranded by a removed node', () => {
+    const { selection } = reconcile(data, ['Desc_OreIron_C'], ['Desc_IronPlate_C'], {
+      Desc_IronIngot_C: IRON_ALLOY,
+    })
+    expect(selection).toEqual({})
+  })
+
+  it('drops selections pointing at a missing or mismatched recipe', () => {
+    const { selection } = reconcile(data, ['Desc_OreIron_C'], ['Desc_IronPlate_C'], {
+      Desc_IronIngot_C: 'Recipe_DoesNotExist_C',
+      Desc_IronPlate_C: 'Recipe_IngotIron_C', // does not produce Iron Plate
+    })
+    expect(selection).toEqual({})
+  })
+
+  it('falls back to a reachable item when a target is stranded', () => {
+    // Copper Ingot is unreachable from iron alone (Cable is not: see the
+    // Alternate: Iron Wire recipe).
+    const { targets } = reconcile(
+      data,
+      ['Desc_OreIron_C'],
+      ['Desc_CopperIngot_C'],
+      {},
+    )
+    expect(targets).toHaveLength(1)
+    expect(targets[0]).not.toBe('Desc_CopperIngot_C')
+    expect(reachableTargets(data, ['Desc_OreIron_C'])).toContain(targets[0])
+  })
+
+  it('reconciles against the offered options, not raw craftability', () => {
+    // Copper Ore is craftable via Converter recipes, but with no copper node it
+    // is not an option the console offers, so it must not survive as a target.
+    const { targets } = reconcile(
+      data,
+      ['Desc_OreIron_C'],
+      ['Desc_OreCopper_C'],
+      {},
+    )
+    expect(targets[0]).not.toBe('Desc_OreCopper_C')
+  })
+
+  it('leaves reachable targets untouched', () => {
+    const { targets } = reconcile(
+      data,
+      ['Desc_OreIron_C'],
+      ['Desc_IronPlate_C', 'Desc_IronRod_C'],
+      {},
+    )
+    expect(targets).toEqual(['Desc_IronPlate_C', 'Desc_IronRod_C'])
+  })
+
+  it('returns the same object identity when nothing changed', () => {
+    const targets = ['Desc_IronPlate_C']
+    const selection = { Desc_IronIngot_C: 'Recipe_Alternate_PureIronIngot_C' }
+    const out = reconcile(data, ['Desc_OreIron_C'], targets, selection)
+    expect(out.targets).toBe(targets)
+    expect(out.selection).toBe(selection)
   })
 })
