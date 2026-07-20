@@ -10,6 +10,17 @@ interface Props {
   beltMk: number
   pipeMk: number
   viewMode: ViewMode
+  /** Pan/zoom window supplied by the viewport. Absent means draw at intrinsic
+   * size, which is what the render tests and a plain static export want. */
+  viewBox?: string
+}
+
+/** Fill the container when the viewport drives the window, otherwise keep the
+ * drawing's natural pixel size. */
+function svgSize(props: Props, width: number, height: number) {
+  return props.viewBox
+    ? { width: '100%', height: '100%', viewBox: props.viewBox }
+    : { width, height, viewBox: `0 0 ${width} ${height}` }
 }
 
 export default function Schematic(props: Props) {
@@ -21,18 +32,32 @@ export default function Schematic(props: Props) {
 }
 
 // ---------------------------------------------------------------------------
-// Standard: one box per stage, machines grouped with counts.
+// Shared grid geometry. Both views lay stages out in columns by depth, each
+// column centred vertically; they differ only in box metrics and in how many
+// units a stage expands into.
 // ---------------------------------------------------------------------------
 
-const W = 216
-const H = 88
-const XGAP = 130
-const YGAP = 42
-const PAD = 34
+interface Metrics {
+  w: number
+  h: number
+  xgap: number
+  ygap: number
+  pad: number
+}
 
-function StandardSchematic({ plan, data, beltMk, pipeMk }: Props) {
-  const itemName = (id: string) => data.items.get(id)?.name ?? id
+interface Grid {
+  width: number
+  height: number
+  /** Unit slots per stage id, in column order */
+  unitsOf: Map<string, Unit[]>
+  stages: { stage: Stage; units: Unit[] }[]
+}
 
+function grid(
+  plan: Plan,
+  m: Metrics,
+  unitCount: (s: Stage) => number,
+): Grid {
   const columns = new Map<number, Stage[]>()
   for (const stage of plan.stages) {
     const col = columns.get(stage.depth) ?? []
@@ -40,22 +65,63 @@ function StandardSchematic({ plan, data, beltMk, pipeMk }: Props) {
     columns.set(stage.depth, col)
   }
   const depths = [...columns.keys()].sort((a, b) => a - b)
-  const xOf = new Map(depths.map((d, i) => [d, PAD + i * (W + XGAP)]))
+  const xOf = new Map(depths.map((d, i) => [d, m.pad + i * (m.w + m.xgap)]))
 
-  const maxRows = Math.max(...[...columns.values()].map((c) => c.length))
-  const height = maxRows * H + (maxRows - 1) * YGAP + PAD * 2
-  const width = PAD * 2 + depths.length * W + (depths.length - 1) * XGAP
+  const colUnits = (d: number) =>
+    (columns.get(d) ?? []).reduce((n, s) => n + unitCount(s), 0)
+  const maxUnits = Math.max(1, ...depths.map(colUnits))
+  const height = maxUnits * m.h + (maxUnits - 1) * m.ygap + m.pad * 2
+  const width =
+    m.pad * 2 + depths.length * m.w + Math.max(0, depths.length - 1) * m.xgap
 
-  const pos = new Map<string, { x: number; y: number }>()
+  const unitsOf = new Map<string, Unit[]>()
+  const stages: { stage: Stage; units: Unit[] }[] = []
   for (const d of depths) {
-    const col = columns.get(d)!
-    const colH = col.length * H + (col.length - 1) * YGAP
+    const total = colUnits(d)
+    const colH = total * m.h + (total - 1) * m.ygap
     let y = (height - colH) / 2
-    for (const stage of col) {
-      pos.set(stage.id, { x: xOf.get(d)!, y })
-      y += H + YGAP
+    const x = xOf.get(d)!
+    for (const stage of columns.get(d)!) {
+      const units: Unit[] = []
+      for (let i = 0; i < unitCount(stage); i++) {
+        units.push({ x, y })
+        y += m.h + m.ygap
+      }
+      unitsOf.set(stage.id, units)
+      stages.push({ stage, units })
     }
   }
+  return { width, height, unitsOf, stages }
+}
+
+/** Intrinsic size of the drawing, so the viewport can fit it before render. */
+export function layoutSize(
+  plan: Plan,
+  viewMode: ViewMode,
+): { width: number; height: number } {
+  const { width, height } =
+    viewMode === 'complex'
+      ? grid(plan, COMPLEX, complexUnitCount)
+      : grid(plan, STANDARD, () => 1)
+  return { width, height }
+}
+
+// ---------------------------------------------------------------------------
+// Standard: one box per stage, machines grouped with counts.
+// ---------------------------------------------------------------------------
+
+const W = 216
+const H = 88
+const STANDARD: Metrics = { w: W, h: H, xgap: 130, ygap: 42, pad: 34 }
+
+function StandardSchematic(props: Props) {
+  const { plan, data, beltMk, pipeMk } = props
+  const itemName = (id: string) => data.items.get(id)?.name ?? id
+
+  const { width, height, unitsOf } = grid(plan, STANDARD, () => 1)
+  const pos = new Map(
+    [...unitsOf].map(([id, units]) => [id, units[0]] as const),
+  )
 
   const subLabel = (s: Stage): string => {
     if (s.kind === 'machine') return s.recipeName ?? ''
@@ -75,9 +141,7 @@ function StandardSchematic({ plan, data, beltMk, pipeMk }: Props) {
 
   return (
     <svg
-      width={width}
-      height={height}
-      viewBox={`0 0 ${width} ${height}`}
+      {...svgSize(props, width, height)}
       role="img"
       aria-label="Factory schematic (standard)"
     >
@@ -135,10 +199,12 @@ function StandardSchematic({ plan, data, beltMk, pipeMk }: Props) {
 
 const CW = 158
 const CH = 46
-const CYGAP = 18
-const CXGAP = 180
-const CPAD = 34
+const COMPLEX: Metrics = { w: CW, h: CH, xgap: 180, ygap: 18, pad: 34 }
 const NODE = 30 // splitter / merger square
+
+/** How many individual machines a stage expands into. */
+const complexUnitCount = (s: Stage) =>
+  s.kind === 'storage' ? 1 : Math.max(1, s.machinesBuilt)
 
 interface Unit {
   x: number
@@ -153,51 +219,16 @@ interface CLink {
   transport: 'belt' | 'pipe'
 }
 
-function ComplexSchematic({ plan, data, beltMk, pipeMk }: Props) {
+function ComplexSchematic(props: Props) {
+  const { plan, data, beltMk, pipeMk } = props
   const itemName = (id: string) => data.items.get(id)?.name ?? id
 
-  // How many individual units a stage expands into.
-  const unitCount = (s: Stage) =>
-    s.kind === 'storage' ? 1 : Math.max(1, s.machinesBuilt)
-
-  // Group stages by depth column, then flatten to individual units per column.
-  const columns = new Map<number, Stage[]>()
-  for (const stage of plan.stages) {
-    const col = columns.get(stage.depth) ?? []
-    col.push(stage)
-    columns.set(stage.depth, col)
-  }
-  const depths = [...columns.keys()].sort((a, b) => a - b)
-  const xOf = new Map(depths.map((d, i) => [d, CPAD + i * (CW + CXGAP)]))
-
-  const colUnitCount = (d: number) =>
-    (columns.get(d) ?? []).reduce((n, s) => n + unitCount(s), 0)
-  const maxUnits = Math.max(1, ...depths.map(colUnitCount))
-  const height = maxUnits * CH + (maxUnits - 1) * CYGAP + CPAD * 2
-  const width = CPAD * 2 + depths.length * CW + (depths.length - 1) * CXGAP
-
-  // Position units, keyed by stage id.
-  const unitsOf = new Map<string, Unit[]>()
-  const stageMeta: {
-    stage: Stage
-    units: Unit[]
-  }[] = []
-  for (const d of depths) {
-    const col = columns.get(d)!
-    const total = colUnitCount(d)
-    const colH = total * CH + (total - 1) * CYGAP
-    let y = (height - colH) / 2
-    const x = xOf.get(d)!
-    for (const stage of col) {
-      const units: Unit[] = []
-      for (let i = 0; i < unitCount(stage); i++) {
-        units.push({ x, y })
-        y += CH + CYGAP
-      }
-      unitsOf.set(stage.id, units)
-      stageMeta.push({ stage, units })
-    }
-  }
+  const {
+    width,
+    height,
+    unitsOf,
+    stages: stageMeta,
+  } = grid(plan, COMPLEX, complexUnitCount)
 
   const centroidY = (units: Unit[]) =>
     units.reduce((sum, u) => sum + u.y + CH / 2, 0) / units.length
@@ -278,9 +309,7 @@ function ComplexSchematic({ plan, data, beltMk, pipeMk }: Props) {
 
   return (
     <svg
-      width={width}
-      height={height}
-      viewBox={`0 0 ${width} ${height}`}
+      {...svgSize(props, width, height)}
       role="img"
       aria-label="Factory schematic (complex)"
     >

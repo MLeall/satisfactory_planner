@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
-import Schematic from './Schematic'
+import Schematic, { layoutSize } from './Schematic'
 import Breakdown from './Breakdown'
 import { loadGameData } from '../data/loader'
 import { solve } from '../engine/solve'
@@ -61,6 +61,26 @@ describe('Schematic rendering', () => {
       )
       expect(html).toContain('<svg')
     }
+  })
+})
+
+describe('layoutSize', () => {
+  const branching = plan([{ item: 'Desc_IronPlateReinforced_C', rate: 10 }])
+
+  it('reports the size the rendered svg actually uses', () => {
+    for (const mode of ['standard', 'complex'] as const) {
+      const { width, height } = layoutSize(branching, mode)
+      const html = renderToStaticMarkup(
+        <Schematic plan={branching} data={data} beltMk={5} pipeMk={2} viewMode={mode} />,
+      )
+      expect(html).toContain(`viewBox="0 0 ${width} ${height}"`)
+    }
+  })
+
+  it('makes the complex view taller, since machines are drawn one by one', () => {
+    expect(layoutSize(branching, 'complex').height).toBeGreaterThan(
+      layoutSize(branching, 'standard').height,
+    )
   })
 })
 

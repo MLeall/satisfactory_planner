@@ -316,11 +316,88 @@ button:focus-visible {
 }
 
 .canvas {
-  overflow: auto;
+  overflow: hidden;
   min-height: 0;
+}
+
+/* The viewport owns the whole canvas area: the svg fills it and the visible
+   window is driven by the viewBox, so panning never scrolls the page. */
+.viewport {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--steel-900);
   background-image: radial-gradient(circle, var(--steel-800) 1px, transparent 1px);
   background-size: 26px 26px;
-  padding: 10px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.viewport:active {
+  cursor: grabbing;
+}
+
+.viewport svg {
+  display: block;
+}
+
+/* Fullscreen paints on the OS backdrop, which has none of our page styling. */
+.viewport--full {
+  background-color: var(--steel-900);
+}
+
+/* Fallback when the Fullscreen API is unavailable: cover the page instead. */
+.viewport--filled {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+}
+
+.viewport-controls {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--steel-700);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--steel-850) 88%, transparent);
+}
+
+.viewport-controls button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.viewport-controls button:hover:not(:disabled) {
+  border-color: var(--ficsit);
+  color: var(--ficsit);
+}
+
+.viewport-controls button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.viewport-zoom {
+  min-width: 44px;
+  padding-right: 4px;
+  text-align: right;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
 }
 
 .errors {

@@ -4,7 +4,8 @@ import { getChainItems, reachableTargets, reconcile } from './engine/helpers'
 import { solve, type PlanInput, type TargetOutput } from './engine/solve'
 import { BELT_TIERS, PIPE_TIERS, type Purity } from './engine/types'
 import Breakdown from './components/Breakdown'
-import Schematic, { type ViewMode } from './components/Schematic'
+import type { ViewMode } from './components/Schematic'
+import SchematicViewport from './components/SchematicViewport'
 import { fmt } from './ui/format'
 
 const data = loadGameData()
@@ -555,7 +556,7 @@ export default function App() {
         {result.ok ? (
           <>
             <div className="canvas">
-              <Schematic
+              <SchematicViewport
                 plan={result.plan}
                 data={data}
                 beltMk={beltMk}
