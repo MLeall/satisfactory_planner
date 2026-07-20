@@ -8,6 +8,7 @@ import type { ViewMode } from './components/Schematic'
 import SchematicViewport from './components/SchematicViewport'
 import { fmt } from './ui/format'
 import type { ManualLayout } from './ui/manualLayout'
+import { decodeShare, shareUrl } from './ui/share'
 
 const data = loadGameData()
 
@@ -72,7 +73,17 @@ function defaults(): PersistedState {
   }
 }
 
+/** A plan someone shared with us, if the fragment holds one. */
+function sharedState(): Partial<PersistedState> | null {
+  if (typeof location === 'undefined') return null
+  return decodeShare(location.hash.slice(1)) as Partial<PersistedState> | null
+}
+
 function loadState(): PersistedState {
+  // A shared link wins over whatever this browser had saved: following the
+  // link is an explicit request to see that plan.
+  const shared = sharedState()
+  if (shared) return { ...defaults(), ...shared }
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return defaults()
@@ -114,8 +125,8 @@ export default function App() {
     return k
   }
 
-  useEffect(() => {
-    const state: PersistedState = {
+  const state: PersistedState = useMemo(
+    () => ({
       nodes,
       minerTier,
       beltMk,
@@ -126,24 +137,35 @@ export default function App() {
       powerShards,
       viewMode,
       layout,
-    }
+    }),
+    [
+      nodes,
+      minerTier,
+      beltMk,
+      pipeMk,
+      outputs,
+      selection,
+      buildMode,
+      powerShards,
+      viewMode,
+      layout,
+    ],
+  )
+
+  useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
     } catch {
       /* storage unavailable — planning still works in-memory */
     }
-  }, [
-    nodes,
-    minerTier,
-    beltMk,
-    pipeMk,
-    outputs,
-    selection,
-    buildMode,
-    powerShards,
-    viewMode,
-    layout,
-  ])
+  }, [state])
+
+  // The plan is in our hands now, so drop it from the address bar: leaving it
+  // there would show a link that goes stale the moment anything is edited.
+  useEffect(() => {
+    if (typeof location === 'undefined' || !location.hash) return
+    history.replaceState(null, '', location.pathname + location.search)
+  }, [])
 
   const resources = useMemo(() => nodes.map((n) => n.resource), [nodes])
 
@@ -251,6 +273,29 @@ export default function App() {
   const updateOutput = (key: number, patch: Partial<OutputRow>) =>
     setOutputs((os) => os.map((o) => (o.key === key ? { ...o, ...patch } : o)))
 
+  // 'idle' | the link to copy by hand when the clipboard is unavailable.
+  const [shareLink, setShareLink] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  const share = () => {
+    const url = shareUrl(location.href, state)
+    setShareLink(null)
+    const copying = navigator.clipboard?.writeText(url)
+    if (!copying) {
+      setShareLink(url)
+      return
+    }
+    copying.then(
+      () => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 2000)
+      },
+      // Clipboard blocked (insecure origin, denied permission): show the link
+      // so the plan is still shareable, just with a manual copy.
+      () => setShareLink(url),
+    )
+  }
+
   const clearAll = () => {
     const d = defaults()
     setNodes(d.nodes)
@@ -280,9 +325,30 @@ export default function App() {
         <span className="tagline">
           From resource node to storage, fully balanced
         </span>
+        <button
+          className="share"
+          onClick={share}
+          title="Copy a link that rebuilds this exact plan"
+        >
+          {copied ? 'Link copied' : 'Share'}
+        </button>
         <button className="clear-all" onClick={clearAll} title="Reset every field">
           Clear all
         </button>
+        {shareLink && (
+          <div className="share-fallback">
+            <label htmlFor="share-link">Copy this link:</label>
+            <input
+              id="share-link"
+              readOnly
+              value={shareLink}
+              onFocus={(e) => e.currentTarget.select()}
+            />
+            <button onClick={() => setShareLink(null)} aria-label="Dismiss">
+              ✕
+            </button>
+          </div>
+        )}
       </header>
 
       <aside className="console">

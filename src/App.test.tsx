@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import App from './App'
+import { encodeShare } from './ui/share'
 
 // Render smoke test for the console wiring. localStorage is absent here, so
 // loadState falls back to the defaults: one iron node, one Iron Plate output.
@@ -20,6 +21,49 @@ describe('App', () => {
   it('offers the build mode toggle instead of a sink checkbox', () => {
     expect(html).toContain('Whole machines')
     expect(html).not.toContain('Smart Splitter')
+  })
+})
+
+describe('App opened from a shared link', () => {
+  const stub = (hash: string) => {
+    vi.stubGlobal('location', { hash, pathname: '/', search: '', href: 'http://x/' })
+    // Saved state must lose to the link: following it asks for that plan.
+    vi.stubGlobal('localStorage', {
+      getItem: () =>
+        JSON.stringify({
+          outputs: [{ key: 1, item: 'Desc_IronRod_C', rate: '' }],
+        }),
+      setItem: () => {},
+      removeItem: () => {},
+    })
+  }
+
+  it('rebuilds the shared plan instead of the saved one', () => {
+    stub(
+      '#' +
+        encodeShare({
+          nodes: [
+            { key: 1, resource: 'Desc_OreCopper_C', purity: 'pure', count: 2 },
+          ],
+          outputs: [{ key: 1, item: 'Desc_Wire_C', rate: '' }],
+        }),
+    )
+    try {
+      const out = renderToStaticMarkup(<App />)
+      expect(out).toContain('Wire output')
+      expect(out).not.toContain('Iron Rod output')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('falls back to the saved plan when the fragment is junk', () => {
+    stub('#not-a-real-token!!')
+    try {
+      expect(renderToStaticMarkup(<App />)).toContain('Iron Rod output')
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
 

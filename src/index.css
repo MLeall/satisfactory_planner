@@ -69,8 +69,16 @@ body {
   letter-spacing: 0.04em;
 }
 
-.header .clear-all {
+.header {
+  position: relative;
+}
+
+.header .share {
   margin-left: auto;
+}
+
+.header .share,
+.header .clear-all {
   background: none;
   border: 1px solid var(--steel-600);
   border-radius: 3px;
@@ -86,6 +94,46 @@ body {
 .header .clear-all:hover {
   color: var(--danger);
   border-color: var(--danger);
+}
+
+.header .share:hover {
+  color: var(--ficsit);
+  border-color: var(--ficsit);
+}
+
+/* Shown only when the clipboard refuses, so the link is still copyable. */
+.share-fallback {
+  position: absolute;
+  top: 100%;
+  right: 20px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--ficsit);
+  border-radius: 3px;
+  background: var(--steel-850);
+  font-size: 12px;
+}
+
+.share-fallback input {
+  width: 320px;
+  padding: 4px 6px;
+  border: 1px solid var(--steel-700);
+  border-radius: 2px;
+  background: var(--steel-900);
+  color: var(--text);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+
+.share-fallback button {
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
 }
 
 /* ---------- console (sidebar) ---------- */
