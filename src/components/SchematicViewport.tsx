@@ -198,7 +198,15 @@ export default function SchematicViewport({
         onMoveBox={onMoveBox}
         scale={view.zoom}
       />
-      <div className="viewport-controls">
+      {/* The controls sit inside the viewport, so their pointerdown would
+          bubble to the pan handler above. That handler calls setPointerCapture,
+          which retargets the rest of the gesture to the container and swallows
+          the button's click entirely: the HUD would look alive but do nothing.
+          Stop the gesture here so the buttons get their clicks. */}
+      <div
+        className="viewport-controls"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
         <button
           onClick={() => stepZoom(BUTTON_STEP)}
           disabled={view.zoom >= MAX_ZOOM}
