@@ -969,3 +969,112 @@ describe('solve: power shard overclocking', () => {
     expect(withZero.ok && withZero.plan.totalPowerShards).toBe(0)
   })
 })
+
+describe('solve: per-edge transport tier', () => {
+  // The selected tier is the best belt/pipe the player has unlocked, i.e. a
+  // ceiling. Each run then gets the cheapest tier that actually carries it, so
+  // a 30/min trickle is not labelled as a Mk.5 belt.
+  it('downgrades a run to the cheapest belt that carries it', () => {
+    const result = solve(fixture(), {
+      ...base,
+      beltMk: 5, // ceiling: 780/min
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      targets: [{ item: 'plate' }],
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // 60 ore/min fits a Mk.1 belt exactly.
+    const ore = result.plan.edges.find((e) => e.item === 'ore-iron')!
+    expect(ore.lanes).toBe(1)
+    expect(ore.tierMk).toBe(1)
+    // 40 plates/min still fits Mk.1.
+    expect(result.plan.edges.find((e) => e.to === 'storage:plate')!.tierMk).toBe(1)
+  })
+
+  it('picks the tier by the load one lane carries, not the total', () => {
+    const result = solve(fixture(), {
+      ...base,
+      minerTier: 3,
+      beltMk: 6, // ceiling 1200/min
+      // 3 pure Mk.3 nodes: 3 * 480 = 1440/min of ore.
+      nodes: [{ resource: 'ore-iron', purity: 'pure', count: 3 }],
+      targets: [{ item: 'ingot' }],
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const ore = result.plan.edges.find((e) => e.item === 'ore-iron')!
+    // Lanes stay minimal against the ceiling: ceil(1440 / 1200) = 2.
+    expect(ore.lanes).toBe(2)
+    // 1440 / 2 = 720 per lane, so Mk.5 (780) suffices; the Mk.6 ceiling is
+    // only what sizes the lane count.
+    expect(ore.tierMk).toBe(5)
+  })
+
+  it('never exceeds the unlocked ceiling', () => {
+    const result = solve(fixture(), {
+      ...base,
+      minerTier: 2,
+      beltMk: 2,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 2 }],
+      targets: [{ item: 'ingot' }],
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const ore = result.plan.edges.find((e) => e.item === 'ore-iron')!
+    expect(ore.lanes).toBe(2)
+    expect(ore.tierMk).toBe(2)
+  })
+
+  it('downgrades pipes the same way', () => {
+    const result = solve(fixture(), {
+      ...base,
+      pipeMk: 2, // ceiling 600 m³/min
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      targets: [{ item: 'goo' }],
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const water = result.plan.edges.find((e) => e.item === 'water')!
+    expect(water.transport).toBe('pipe')
+    expect(water.lanes).toBe(1)
+    expect(water.tierMk).toBe(1) // 120 m³/min fits a Mk.1 pipe
+  })
+})
+
+describe('solve: sink placement', () => {
+  it('puts a sink one column past the stage that feeds it', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      targets: [{ item: 'widget', rate: 10 }],
+      sinkOverflow: true,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const sink = result.plan.stages.find((s) => s.kind === 'sink')!
+    const feedingEdge = result.plan.edges.find((e) => e.to === sink.id)!
+    const source = result.plan.stages.find((s) => s.id === feedingEdge.from)!
+    // Adjacent to its source, so the belt crosses no other machine and the
+    // sink is not parked at the far right of the diagram.
+    expect(sink.depth).toBe(source.depth + 1)
+  })
+
+  it('keeps a mid-chain overflow sink before the storage column', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 2 }],
+      targets: [{ item: 'plate', rate: 2 }],
+      buildMode: 'whole',
+      sinkOverflow: true,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // Whole machines overproduce ingots; that overflow is sunk right after the
+    // smelters instead of being belted past the whole factory.
+    const sink = result.plan.stages.find((s) => s.id === 'sink:ingot')!
+    const smelters = result.plan.stages.find((s) => s.recipeId === 'r-ingot')!
+    const storage = result.plan.stages.find((s) => s.kind === 'storage')!
+    expect(sink.depth).toBe(smelters.depth + 1)
+    expect(sink.depth).toBeLessThan(storage.depth)
+  })
+})

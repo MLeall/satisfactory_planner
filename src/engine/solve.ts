@@ -27,6 +27,9 @@ export interface TargetOutput {
 export interface PlanInput {
   nodes: NodeInput[]
   minerTier: 1 | 2 | 3
+  /** Belt/pipe tier: the best the player has unlocked, used as a ceiling. It
+   * sizes the lane count and the miner cap; each individual run then drops to
+   * the cheapest tier that still carries it. */
   beltMk: number
   pipeMk: number
   /** One or more output items to produce, each into its own storage. */
@@ -84,6 +87,9 @@ export interface Edge {
   rate: number
   transport: 'belt' | 'pipe'
   lanes: number
+  /** Cheapest belt/pipe Mk that carries one lane of this run, capped at the
+   * unlocked tier. Building Mk.6 everywhere is a waste when Mk.2 keeps up. */
+  tierMk: number
 }
 
 export interface PlanTarget {
@@ -231,6 +237,34 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     isLiquid(item) ? pipeSpeed : beltSpeed
   const lanesFor = (item: ItemId, rate: number) =>
     Math.max(1, Math.ceil(rate / transportSpeed(item) - EPS))
+
+  /** A run of `rate` split over `lanes`: the cheapest unlocked tier whose speed
+   * covers one lane. Lanes are sized against the ceiling, so such a tier always
+   * exists and the search only ever walks down from it. */
+  const tierFor = (item: ItemId, rate: number, lanes: number): number => {
+    const liquid = isLiquid(item)
+    const ceiling = liquid ? input.pipeMk : input.beltMk
+    const tiers = liquid ? PIPE_TIERS : BELT_TIERS
+    const perLane = rate / lanes
+    const enough = tiers.find(
+      (t) => t.mk <= ceiling && t.speed >= perLane - EPS,
+    )
+    return enough?.mk ?? ceiling
+  }
+
+  /** An edge, with its lane count and tier resolved from the rate. */
+  const edge = (from: string, to: string, item: ItemId, rate: number): Edge => {
+    const lanes = lanesFor(item, rate)
+    return {
+      from,
+      to,
+      item,
+      rate,
+      transport: isLiquid(item) ? 'pipe' : 'belt',
+      lanes,
+      tierMk: tierFor(item, rate, lanes),
+    }
+  }
 
   if (input.targets.length === 0) return fail('Add at least one output item.')
 
@@ -571,14 +605,9 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     })
 
     for (const flow of inputs) {
-      edges.push({
-        from: producerStageId(flow.item),
-        to: stageId,
-        item: flow.item,
-        rate: flow.rate,
-        transport: isLiquid(flow.item) ? 'pipe' : 'belt',
-        lanes: lanesFor(flow.item, flow.rate),
-      })
+      edges.push(
+        edge(producerStageId(flow.item), stageId, flow.item, flow.rate),
+      )
     }
   }
 
@@ -668,20 +697,14 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       outputs: [],
       depth: terminalDepth,
     })
-    edges.push({
-      from: producerStageId(item),
-      to: `storage:${item}`,
-      item,
-      rate,
-      transport: liquid ? 'pipe' : 'belt',
-      lanes: lanesFor(item, rate),
-    })
+    edges.push(edge(producerStageId(item), `storage:${item}`, item, rate))
   }
 
   // AWESOME Sinks: consume sinkable (solid, point-bearing) surplus for coupons.
   let sinkPointsPerMin = 0
   if (input.sinkOverflow) {
     const sink = data.awesomeSink
+    const depthOfStage = new Map(stages.map((s) => [s.id, s.depth]))
     for (const [item, rate] of surplusMap) {
       if (rate <= EPS || isLiquid(item)) continue
       const points = data.items.get(item)?.sinkPoints ?? 0
@@ -689,6 +712,7 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       sinkPointsPerMin += rate * points
       surplusMap.delete(item)
       const lanes = lanesFor(item, rate) // one input belt per sink
+      const from = byproductSource.get(item) ?? producerStageId(item)
       stages.push({
         id: `sink:${item}`,
         kind: 'sink',
@@ -701,16 +725,11 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
         powerShards: 0,
         inputs: [{ item, rate }],
         outputs: [],
-        depth: terminalDepth,
+        // Right beside the stage it drains, not parked at the far right: the
+        // belt then only crosses the empty gap between two columns.
+        depth: (depthOfStage.get(from) ?? producerDepth) + 1,
       })
-      edges.push({
-        from: byproductSource.get(item) ?? producerStageId(item),
-        to: `sink:${item}`,
-        item,
-        rate,
-        transport: 'belt',
-        lanes,
-      })
+      edges.push(edge(from, `sink:${item}`, item, rate))
     }
   }
 

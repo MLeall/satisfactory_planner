@@ -21,8 +21,6 @@ import Schematic, { boxKeys, layoutSize, type ViewMode } from './Schematic'
 interface Props {
   plan: Plan
   data: GameData
-  beltMk: number
-  pipeMk: number
   viewMode: ViewMode
   /** Owned by the app, not by this component: an invalid input swaps the whole
    * viewport for the error panel, and state living here would die with it. */
@@ -41,8 +39,6 @@ const BUTTON_STEP = 1.35
 export default function SchematicViewport({
   plan,
   data,
-  beltMk,
-  pipeMk,
   viewMode,
   layout,
   onLayoutChange,
@@ -190,8 +186,6 @@ export default function SchematicViewport({
       <Schematic
         plan={plan}
         data={data}
-        beltMk={beltMk}
-        pipeMk={pipeMk}
         viewMode={viewMode}
         viewBox={viewBox(view, box.w, box.h)}
         layout={layout}

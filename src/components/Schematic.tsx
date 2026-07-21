@@ -2,6 +2,12 @@ import { useRef } from 'react'
 import type { Plan, Stage } from '../engine/solve'
 import type { GameData } from '../engine/types'
 import { fmt } from '../ui/format'
+import {
+  balancer,
+  junctionTree,
+  treeLevels,
+  type JunctionNode,
+} from '../ui/junctions'
 import type { ManualLayout, Point } from '../ui/manualLayout'
 
 export type ViewMode = 'standard' | 'complex'
@@ -9,8 +15,6 @@ export type ViewMode = 'standard' | 'complex'
 interface Props {
   plan: Plan
   data: GameData
-  beltMk: number
-  pipeMk: number
   viewMode: ViewMode
   /** Pan/zoom window supplied by the viewport. Absent means draw at intrinsic
    * size, which is what the render tests and a plain static export want. */
@@ -21,6 +25,75 @@ interface Props {
   onMoveBox?: (key: string, auto: Point, dx: number, dy: number) => void
   /** CSS pixels per SVG unit, to convert pointer deltas while dragging. */
   scale?: number
+}
+
+/**
+ * A belt as a curve broken into several cubic pieces. One long curve would do
+ * visually, but `marker-mid` only puts an arrow where two pieces meet, and the
+ * arrows are what say which way the belt runs when the flow animation is off
+ * (or, on a loop belt, runs against the eye's expectation).
+ */
+function beltPath(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  bow: number,
+): string {
+  const n = Math.min(6, Math.max(2, Math.round(Math.hypot(x2 - x1, y2 - y1) / 100)))
+  // Belts are stored the way they flow, so a return run goes right to left; the
+  // control points have to lean the same way or the curve doubles back.
+  const lean = x2 >= x1 ? bow : -bow
+  const lerp = (a: Point, b: Point, t: number) => ({
+    x: a.x + (b.x - a.x) * t,
+    y: a.y + (b.y - a.y) * t,
+  })
+  const r = (v: number) => Math.round(v * 10) / 10
+  const at = (p: Point) => `${r(p.x)} ${r(p.y)}`
+
+  let p0 = { x: x1, y: y1 }
+  let p1 = { x: x1 + lean, y: y1 }
+  let p2 = { x: x2 - lean, y: y2 }
+  const p3 = { x: x2, y: y2 }
+  let d = `M ${at(p0)}`
+  for (let k = 0; k < n - 1; k++) {
+    // de Casteljau: cut the remaining curve so the pieces come out even.
+    const t = 1 / (n - k)
+    const a = lerp(p0, p1, t)
+    const b = lerp(p1, p2, t)
+    const c = lerp(p2, p3, t)
+    const ab = lerp(a, b, t)
+    const bc = lerp(b, c, t)
+    const mid = lerp(ab, bc, t)
+    d += ` C ${at(a)}, ${at(ab)}, ${at(mid)}`
+    p0 = mid
+    p1 = bc
+    p2 = c
+  }
+  return `${d} C ${at(p1)}, ${at(p2)}, ${at(p3)}`
+}
+
+/** The arrowheads `marker-mid` drops along a belt, one set per belt kind. */
+function BeltMarkers() {
+  return (
+    <defs>
+      {(['belt', 'pipe', 'loop'] as const).map((kind) => (
+        <marker
+          key={kind}
+          id={`arrow-${kind}`}
+          viewBox="0 0 10 10"
+          refX="5"
+          refY="5"
+          markerWidth="9"
+          markerHeight="9"
+          markerUnits="userSpaceOnUse"
+          orient="auto"
+        >
+          <path className={`arrow-${kind}`} d="M 1 1.5 L 8.5 5 L 1 8.5 Z" />
+        </marker>
+      ))}
+    </defs>
+  )
 }
 
 /** Fill the container when the viewport drives the window, otherwise keep the
@@ -90,6 +163,13 @@ function grid(
   const width =
     m.pad * 2 + depths.length * m.w + Math.max(0, depths.length - 1) * m.xgap
 
+  // Who feeds whom, so a column can be ordered against the column before it.
+  const feeders = new Map<string, string[]>()
+  for (const e of plan.edges) {
+    feeders.set(e.to, [...(feeders.get(e.to) ?? []), e.from])
+  }
+  const centerY = new Map<string, number>()
+
   const unitsOf = new Map<string, Unit[]>()
   const stages: { stage: Stage; units: Unit[] }[] = []
   for (const d of depths) {
@@ -97,7 +177,23 @@ function grid(
     const colH = total * m.h + (total - 1) * m.ygap
     let y = (height - colH) / 2
     const x = xOf.get(d)!
-    for (const stage of columns.get(d)!) {
+    // Barycentre ordering: each stage lines up with whatever feeds it, which is
+    // what keeps a belt from cutting across the column. It is also what parks an
+    // AWESOME Sink right beside the stage it drains instead of leaving it
+    // stranded among the storage containers.
+    const ordered = [...columns.get(d)!]
+      .map((stage, i) => {
+        const ys = (feeders.get(stage.id) ?? [])
+          .map((id) => centerY.get(id))
+          .filter((v): v is number => v !== undefined)
+        // No feeder placed yet only happens in the extractor column, where the
+        // declared order is as good as any.
+        const bary = ys.length > 0 ? ys.reduce((a, b) => a + b, 0) / ys.length : 0
+        return { stage, i, bary, anchored: ys.length > 0 }
+      })
+      .sort((a, b) => (a.anchored && b.anchored ? a.bary - b.bary : 0) || a.i - b.i)
+      .map((s) => s.stage)
+    for (const stage of ordered) {
       const units: Unit[] = []
       for (let i = 0; i < unitCount(stage); i++) {
         const key = boxKey(stage.id, i, multi)
@@ -109,6 +205,10 @@ function grid(
       }
       unitsOf.set(stage.id, units)
       stages.push({ stage, units })
+      centerY.set(
+        stage.id,
+        units.reduce((sum, u) => sum + u.y + m.h / 2, 0) / units.length,
+      )
     }
   }
   return { width, height, unitsOf, stages }
@@ -182,25 +282,37 @@ function Draggable({
 }
 
 /** Intrinsic size of the drawing, so the viewport can fit it before render. */
+/** The wiring a plan draws in the complex view, for tests and for sizing. */
+export function complexLayout(plan: Plan, layout: ManualLayout = {}): Wiring {
+  const m = complexMetrics(plan)
+  const g = grid(plan, m, complexUnitCount, true, layout)
+  return complexWiring(plan, g.unitsOf, (id) => id, g.height, layout)
+}
+
 export function layoutSize(
   plan: Plan,
   viewMode: ViewMode,
 ): { width: number; height: number } {
-  const { width, height } =
-    viewMode === 'complex'
-      ? grid(plan, COMPLEX, complexUnitCount, true)
-      : grid(plan, STANDARD, () => 1, false)
-  return { width, height }
+  if (viewMode !== 'complex') {
+    const { width, height } = grid(plan, STANDARD, () => 1, false)
+    return { width, height }
+  }
+  const g = grid(plan, complexMetrics(plan), complexUnitCount, true)
+  // A balancer loop hangs below the columns, so the grid height is a floor.
+  return { width: g.width, height: complexLayout(plan).height }
 }
 
 /** Every box key the current plan draws, so stale overrides can be pruned. */
 export function boxKeys(plan: Plan, viewMode: ViewMode): Set<string> {
   const multi = viewMode === 'complex'
   const { unitsOf } = multi
-    ? grid(plan, COMPLEX, complexUnitCount, true)
+    ? grid(plan, complexMetrics(plan), complexUnitCount, true)
     : grid(plan, STANDARD, () => 1, false)
   const keys = new Set<string>()
   for (const units of unitsOf.values()) for (const u of units) keys.add(u.key)
+  // Splitters and Mergers are draggable too, so their overrides must survive
+  // the prune that follows a replan.
+  if (multi) for (const j of complexLayout(plan).junctions) keys.add(j.key)
   return keys
 }
 
@@ -213,7 +325,7 @@ const H = 88
 const STANDARD: Metrics = { w: W, h: H, xgap: 130, ygap: 42, pad: 34 }
 
 function StandardSchematic(props: Props) {
-  const { plan, data, beltMk, pipeMk } = props
+  const { plan, data } = props
   const itemName = (id: string) => data.items.get(id)?.name ?? id
 
   const { width, height, unitsOf } = grid(
@@ -247,6 +359,7 @@ function StandardSchematic(props: Props) {
       role="img"
       aria-label="Factory schematic (standard)"
     >
+      <BeltMarkers />
       {plan.edges.map((e, i) => {
         const from = pos.get(e.from)
         const to = pos.get(e.to)
@@ -258,12 +371,13 @@ function StandardSchematic(props: Props) {
         const mx = (sx + tx) / 2
         const my = (sy + ty) / 2
         const transport =
-          e.transport === 'belt' ? `Belt Mk.${beltMk}` : `Pipe Mk.${pipeMk}`
+          e.transport === 'belt' ? `Belt Mk.${e.tierMk}` : `Pipe Mk.${e.tierMk}`
         return (
           <g key={i}>
             <path
               className={`edge edge--${e.transport}`}
-              d={`M ${sx} ${sy} C ${sx + 55} ${sy}, ${tx - 55} ${ty}, ${tx} ${ty}`}
+              markerMid={`url(#arrow-${e.transport})`}
+              d={beltPath(sx, sy, tx, ty, 55)}
             />
             <text className="edge-label" x={mx} y={my - 22}>
               {itemName(e.item)} · {fmt(e.rate)}/min
@@ -304,12 +418,39 @@ function StandardSchematic(props: Props) {
 
 const CW = 158
 const CH = 46
-const COMPLEX: Metrics = { w: CW, h: CH, xgap: 180, ygap: 18, pad: 34 }
+const COMPLEX: Metrics = { w: CW, h: CH, xgap: 300, ygap: 18, pad: 34 }
 const NODE = 30 // splitter / merger square
 
 /** How many individual machines a stage expands into. */
 const complexUnitCount = (s: Stage) =>
   s.kind === 'storage' ? 1 : Math.max(1, s.machinesBuilt)
+
+/**
+ * The gap between two columns has to hold a Merger tree, the Splitter that
+ * divides the trunk between destinations, and a Splitter tree, all in series.
+ * A 16-machine stage needs four Merger levels on its own, so a fixed gap either
+ * cramps big plans or stretches small ones; size it from the plan instead.
+ */
+function complexMetrics(plan: Plan): Metrics {
+  const units = new Map(plan.stages.map((s) => [s.id, complexUnitCount(s)]))
+  const destinations = new Map<string, number>()
+  for (const e of plan.edges) {
+    destinations.set(e.from, (destinations.get(e.from) ?? 0) + 1)
+  }
+  let levels = 1
+  for (const e of plan.edges) {
+    const bal = balancer(units.get(e.to) ?? 1)
+    const fanout = destinations.get(e.from) ?? 1
+    levels = Math.max(
+      levels,
+      treeLevels(junctionTree(units.get(e.from) ?? 1)) +
+        (fanout > 1 ? treeLevels(junctionTree(fanout)) : 0) +
+        treeLevels(bal.tree) +
+        (bal.loopback.length > 0 ? 1 : 0),
+    )
+  }
+  return { ...COMPLEX, xgap: Math.max(COMPLEX.xgap, (levels + 1) * LEVEL) }
+}
 
 interface Unit extends Point {
   key: string
@@ -317,94 +458,431 @@ interface Unit extends Point {
   auto: Point
 }
 
-interface CLink {
+export interface CLink {
   x1: number
   y1: number
   x2: number
   y2: number
   transport: 'belt' | 'pipe'
+  /** A leg of the balancer going back round, drawn apart from the forward flow */
+  loop?: boolean
+}
+
+export interface CJunction {
+  /** Stable across replans, so a dragged square keeps its spot like a machine */
+  key: string
+  x: number
+  y: number
+  /** Where the automatic layout put it, before any drag */
+  auto: Point
+  kind: 'splitter' | 'merger'
+  /** Belts wired into (merger) or out of (splitter) the square */
+  ways: number
+  /** The face belts arrive at, and the single face they leave by. A Splitter
+   * has one inbound belt and up to three out; a Merger is the mirror of that. */
+  inPort: Point
+  outPort: Point
+  inSide: FaceSide
+  outSide: FaceSide
+  /** Part of a balancer's return path rather than the forward flow */
+  loop?: boolean
+}
+
+/** Where a belt attaches, and where it would have attached had nobody dragged
+ * anything. Neighbours are laid out off `auto`, so moving one square never
+ * drags the rest of the tree along with it; the belts use `pos` and follow. */
+interface Face {
+  pos: Point
+  auto: Point
+}
+
+/** A junction is a square with four faces, and a belt has to meet the one it
+ * actually comes from: run it into the far side and it reads as if it left the
+ * square rather than entered it. */
+type FaceSide = 'left' | 'right' | 'top' | 'bottom'
+
+function facePoint(rect: Point, side: FaceSide): Point {
+  if (side === 'left') return { x: rect.x, y: rect.y + NODE / 2 }
+  if (side === 'right') return { x: rect.x + NODE, y: rect.y + NODE / 2 }
+  if (side === 'top') return { x: rect.x + NODE / 2, y: rect.y }
+  return { x: rect.x + NODE / 2, y: rect.y + NODE }
+}
+
+/**
+ * Put a junction square down, honouring a drag the user made. `at` is where the
+ * automatic layout wants its trunk-side face; `dir` says which side the branches
+ * are on (+1 = branches to the left, as a Merger pulling from producers).
+ */
+function placeJunction(
+  key: string,
+  kind: 'splitter' | 'merger',
+  ways: number,
+  rect: Point,
+  trunkSide: FaceSide,
+  branchSide: FaceSide,
+  layout: ManualLayout,
+  junctions: CJunction[],
+  loop = false,
+): { trunk: Face; branch: Face } {
+  const auto = rect
+  const p = layout[key] ?? auto
+  const faces = (q: Point) => ({
+    trunk: facePoint(q, trunkSide),
+    branch: facePoint(q, branchSide),
+  })
+  const now = faces(p)
+  const was = faces(auto)
+  junctions.push({
+    key,
+    x: p.x,
+    y: p.y,
+    auto,
+    kind,
+    ways,
+    inPort: kind === 'merger' ? now.branch : now.trunk,
+    outPort: kind === 'merger' ? now.trunk : now.branch,
+    inSide: kind === 'merger' ? branchSide : trunkSide,
+    outSide: kind === 'merger' ? trunkSide : branchSide,
+    loop,
+  })
+  return {
+    trunk: { pos: now.trunk, auto: was.trunk },
+    branch: { pos: now.branch, auto: was.branch },
+  }
+}
+
+/** Horizontal room one level of junctions takes. */
+const LEVEL = NODE + 26
+
+/**
+ * Draw the Splitter (or Merger) tree that wires `ports` to a single trunk, and
+ * return where that trunk starts. `edgeX` is the machine side, `dir` the way the
+ * tree grows from it: +1 for a Merger fanning in from the producers on the left,
+ * -1 for a Splitter fanning out to the consumers on the right.
+ *
+ * Junctions sit at the vertical centre of the ports they serve, so a branch
+ * never has to cross a sibling branch to reach its machine.
+ */
+function wire(
+  ports: Face[],
+  tree: JunctionNode,
+  kind: 'splitter' | 'merger',
+  edgeX: number,
+  dir: 1 | -1,
+  transport: 'belt' | 'pipe',
+  junctions: CJunction[],
+  links: CLink[],
+  keyBase: string,
+  layout: ManualLayout,
+  loop = false,
+): Face {
+  const place = (node: JunctionNode, path: string): Face => {
+    if (node.children.length === 0) return ports[node.leaves[0]]
+    // Centred on where the automatic layout puts the machines under it, and one
+    // level per belt hop between here and the deepest of them.
+    const ys = node.leaves.map((i) => ports[i].auto.y)
+    const x = edgeX + dir * treeLevels(node) * LEVEL
+    const { trunk, branch } = placeJunction(
+      `${keyBase}/${path}`,
+      kind,
+      node.children.length,
+      {
+        x: dir > 0 ? x - NODE : x,
+        y: (Math.min(...ys) + Math.max(...ys)) / 2 - NODE / 2,
+      },
+      dir > 0 ? 'right' : 'left',
+      dir > 0 ? 'left' : 'right',
+      layout,
+      junctions,
+      loop,
+    )
+    node.children.forEach((child, i) => {
+      const c = place(child, `${path}.${i}`).pos
+      // Stored the way it flows: into a Merger from its branches, out of a
+      // Splitter towards them. The arrowheads read straight off that.
+      links.push(
+        kind === 'merger'
+          ? { x1: c.x, y1: c.y, x2: branch.pos.x, y2: branch.pos.y, transport, loop }
+          : { x1: branch.pos.x, y1: branch.pos.y, x2: c.x, y2: c.y, transport, loop },
+      )
+    })
+    return trunk
+  }
+  return place(tree, '0')
+}
+
+interface CLabel {
+  x: number
+  y: number
+  text: string
+  sub: string
+  note?: string
+}
+
+export interface Wiring {
+  links: CLink[]
+  junctions: CJunction[]
+  labels: CLabel[]
+  /** Drawing height, grown when a balancer loop hangs below the columns. */
+  height: number
+}
+
+/** Vertical room one returning leg of a balancer takes below the machines. */
+const LOOP_STEP = 30
+/** Horizontal stagger between the Splitter lines of two different items. */
+const LANE_GAP = 20
+
+/**
+ * Wire a whole plan up the way it would be built:
+ *
+ *   machines -> Merger tree -> one trunk -> Splitter tree -> machines
+ *
+ * A machine has a single output belt, so a stage is merged exactly once no
+ * matter how many stages it feeds, and a Splitter (never the Merger) is what
+ * divides that trunk between them. Where a stage has an awkward machine count,
+ * the Splitter tree is overbuilt and the spare legs loop back, which is the
+ * only way the game divides a belt into 5, 7, 10 … equal parts.
+ */
+export function complexWiring(
+  plan: Plan,
+  unitsOf: Map<string, Unit[]>,
+  itemName: (id: string) => string,
+  gridHeight: number,
+  layout: ManualLayout = {},
+): Wiring {
+  const links: CLink[] = []
+  const junctions: CJunction[] = []
+  const labels: CLabel[] = []
+  let lowest = 0
+
+  // A machine port is wherever the machine is: dragging a machine is meant to
+  // take its belts and its Splitters with it.
+  const port = (p: Point): Face => ({ pos: p, auto: p })
+  const right = (u: Unit) => port({ x: u.x + CW, y: u.y + CH / 2 })
+  const left = (u: Unit) => port({ x: u.x, y: u.y + CH / 2 })
+
+  const outgoing = new Map<string, typeof plan.edges>()
+  const inbound = new Map<string, string[]>()
+  for (const e of plan.edges) {
+    if (!unitsOf.has(e.from) || !unitsOf.has(e.to)) continue
+    outgoing.set(e.from, [...(outgoing.get(e.from) ?? []), e])
+    inbound.set(e.to, [...(inbound.get(e.to) ?? []), e.item])
+  }
+
+  for (const [fromId, edges] of outgoing) {
+    const producers = unitsOf.get(fromId)!
+    const transport = edges[0].transport
+
+    // One trunk out of the stage, whatever it goes on to feed.
+    const trunk = wire(
+      producers.map(right),
+      junctionTree(producers.length),
+      'merger',
+      Math.max(...producers.map((u) => u.x)) + CW,
+      1,
+      transport,
+      junctions,
+      links,
+      `merge:${fromId}`,
+      layout,
+    )
+
+    const heads: Face[] = []
+    for (const e of edges) {
+      const consumers = unitsOf.get(e.to)!
+      // A stage fed two different items gets a Splitter line per item. They
+      // land on the same machines, so stagger them rather than draw one on top
+      // of the other.
+      const lane = (inbound.get(e.to) ?? []).indexOf(e.item)
+      const toCol = consumers[0].x - lane * LANE_GAP
+      const bal = balancer(consumers.length)
+
+      // Spare legs hang below the machines, in the slot a machine would take.
+      const bottom = Math.max(...consumers.map((u) => u.y)) + CH / 2
+      const loopPorts = bal.loopback.map((_, i) =>
+        port({ x: toCol, y: bottom + LOOP_STEP * (i + 1) }),
+      )
+      lowest = Math.max(lowest, ...loopPorts.map((p) => p.pos.y))
+
+      const ports = [...consumers.map(left), ...loopPorts]
+      const run = `${fromId}>${e.to}:${e.item}`
+      let head: Face
+
+      if (loopPorts.length === 0) {
+        head = wire(
+          ports, bal.tree, 'splitter', toCol, -1, transport, junctions, links,
+          `split:${run}`, layout,
+        )
+      } else {
+        // The build the 1:5 balancer is drawn from: the trunk is divided by the
+        // root Splitter, each branch is topped up by its own Merger, and the
+        // returning legs are divided by a Splitter into one share per branch.
+        // Every branch then carries exactly what its leg count needs.
+        const branches = bal.tree.children.map((b, i) =>
+          wire(
+            ports, b, 'splitter', toCol, -1, transport, junctions, links,
+            `split:${run}#${i}`, layout,
+          ),
+        )
+        // One Merger per branch, joining the trunk share to the loop share.
+        const mergers = branches.map((b, i) => {
+          const { trunk: out, branch: into } = placeJunction(
+            `bmerge:${run}#${i}`,
+            'merger',
+            2,
+            { x: b.auto.x - LEVEL - NODE, y: b.auto.y - NODE / 2 },
+            'right',
+            'left',
+            layout,
+            junctions,
+          )
+          links.push({ x1: out.pos.x, y1: out.pos.y, x2: b.pos.x, y2: b.pos.y, transport })
+          return into
+        })
+
+        const ys = mergers.map((m) => m.auto.y)
+        const rootX = Math.min(...mergers.map((m) => m.auto.x)) - LEVEL
+        const root = placeJunction(
+          `sroot:${run}`,
+          'splitter',
+          mergers.length,
+          { x: rootX, y: (Math.min(...ys) + Math.max(...ys)) / 2 - NODE / 2 },
+          'left',
+          'right',
+          layout,
+          junctions,
+        )
+        for (const m of mergers) {
+          links.push({
+            x1: root.branch.pos.x, y1: root.branch.pos.y,
+            x2: m.pos.x, y2: m.pos.y,
+            transport,
+          })
+        }
+        head = root.trunk
+
+        // The legs that came back round, gathered and shared out again.
+        const collected: Face =
+          bal.collector === null
+            ? loopPorts[0]
+            : wire(
+                loopPorts, bal.collector, 'merger', toCol, -1, transport,
+                junctions, links, `loop:${run}`, layout, true,
+              )
+        // The return runs right to left along the bottom lane and the branch
+        // Mergers are above, so this square takes its belt on the right face
+        // and feeds them out of the top one.
+        const fb = placeJunction(
+          `sfb:${run}`,
+          'splitter',
+          mergers.length,
+          {
+            // Clear of the return lane *and* of every Merger it feeds, so the
+            // belts out of its top face always climb rather than double back
+            // around the square.
+            x: rootX,
+            y:
+              Math.max(
+                ...loopPorts.map((p) => p.auto.y),
+                ...mergers.map((m) => m.auto.y),
+              ) +
+              LOOP_STEP -
+              NODE / 2,
+          },
+          'right',
+          'top',
+          layout,
+          junctions,
+          true,
+        )
+        lowest = Math.max(lowest, fb.trunk.auto.y + NODE)
+        links.push({
+          x1: collected.pos.x, y1: collected.pos.y,
+          x2: fb.trunk.pos.x, y2: fb.trunk.pos.y,
+          transport, loop: true,
+        })
+        for (const m of mergers) {
+          links.push({
+            x1: fb.branch.pos.x, y1: fb.branch.pos.y,
+            x2: m.pos.x, y2: m.pos.y,
+            transport, loop: true,
+          })
+        }
+      }
+
+      heads.push(head)
+
+      const tier =
+        transport === 'belt' ? `Belt Mk.${e.tierMk}` : `Pipe Mk.${e.tierMk}`
+      labels.push({
+        x: (trunk.pos.x + head.pos.x) / 2,
+        y: (trunk.pos.y + head.pos.y) / 2 - 8,
+        text: `${itemName(e.item)} · ${fmt(e.rate)}/min`,
+        sub: `${e.lanes}× ${tier}`,
+        note:
+          bal.loopback.length > 0
+            ? `1:${consumers.length} balancer · ${fmt(e.rate * bal.feedbackRatio)}/min loops back`
+            : undefined,
+      })
+    }
+
+    // A Merger has one output, so several destinations are served by a
+    // Splitter on the trunk, never by extra belts off the Merger itself.
+    if (heads.length === 1) {
+      links.push({
+        x1: trunk.pos.x,
+        y1: trunk.pos.y,
+        x2: heads[0].pos.x,
+        y2: heads[0].pos.y,
+        transport,
+      })
+    } else {
+      const fan = wire(
+        heads,
+        junctionTree(heads.length),
+        'splitter',
+        Math.min(...heads.map((h) => h.auto.x)),
+        -1,
+        transport,
+        junctions,
+        links,
+        `fan:${fromId}`,
+        layout,
+      )
+      links.push({
+        x1: trunk.pos.x, y1: trunk.pos.y,
+        x2: fan.pos.x, y2: fan.pos.y,
+        transport,
+      })
+    }
+  }
+
+  return {
+    links,
+    junctions,
+    labels,
+    height: Math.max(gridHeight, lowest + COMPLEX.pad),
+  }
 }
 
 function ComplexSchematic(props: Props) {
-  const { plan, data, beltMk, pipeMk } = props
+  const { plan, data } = props
   const itemName = (id: string) => data.items.get(id)?.name ?? id
 
   const {
     width,
-    height,
+    height: gridHeight,
     unitsOf,
     stages: stageMeta,
-  } = grid(plan, COMPLEX, complexUnitCount, true, props.layout)
+  } = grid(plan, complexMetrics(plan), complexUnitCount, true, props.layout)
 
-  const centroidY = (units: Unit[]) =>
-    units.reduce((sum, u) => sum + u.y + CH / 2, 0) / units.length
-
-  // Build wiring: producers -> [merger] -> [splitter] -> consumers.
-  const links: CLink[] = []
-  const junctions: { x: number; y: number; kind: 'splitter' | 'merger' }[] = []
-  const labels: { x: number; y: number; text: string; sub: string }[] = []
-
-  for (const e of plan.edges) {
-    const producers = unitsOf.get(e.from)
-    const consumers = unitsOf.get(e.to)
-    if (!producers || !consumers) continue
-    const transport = e.transport
-    const toCol = consumers[0].x
-    const splitterX = toCol - 44
-    const mergerX = toCol - 44 - NODE - 24
-    const cy = centroidY(consumers)
-
-    const right = (u: Unit) => ({ x: u.x + CW, y: u.y + CH / 2 })
-    const left = (u: Unit) => ({ x: u.x, y: u.y + CH / 2 })
-
-    const needMerger = producers.length > 1
-    const needSplitter = consumers.length > 1
-
-    let handoffX: number
-    let handoffY: number
-
-    if (needMerger) {
-      const mx = mergerX
-      const my = cy
-      junctions.push({ x: mx, y: my - NODE / 2, kind: 'merger' })
-      for (const p of producers) {
-        const s = right(p)
-        links.push({ x1: s.x, y1: s.y, x2: mx, y2: my, transport })
-      }
-      handoffX = mx + NODE
-      handoffY = my
-    } else {
-      const s = right(producers[0])
-      handoffX = s.x
-      handoffY = s.y
-    }
-
-    if (needSplitter) {
-      const sx = splitterX
-      const sy = cy
-      junctions.push({ x: sx, y: sy - NODE / 2, kind: 'splitter' })
-      links.push({ x1: handoffX, y1: handoffY, x2: sx, y2: sy, transport })
-      for (const c of consumers) {
-        const t = left(c)
-        links.push({ x1: sx + NODE, y1: sy, x2: t.x, y2: t.y, transport })
-      }
-      labels.push({
-        x: sx,
-        y: sy - NODE / 2 - 6,
-        text: `${itemName(e.item)} · ${fmt(e.rate)}/min`,
-        sub: `${e.lanes}× ${transport === 'belt' ? `Belt Mk.${beltMk}` : `Pipe Mk.${pipeMk}`}`,
-      })
-    } else {
-      const t = left(consumers[0])
-      links.push({ x1: handoffX, y1: handoffY, x2: t.x, y2: t.y, transport })
-      labels.push({
-        x: (handoffX + t.x) / 2,
-        y: (handoffY + t.y) / 2 - 8,
-        text: `${itemName(e.item)} · ${fmt(e.rate)}/min`,
-        sub: `${e.lanes}× ${transport === 'belt' ? `Belt Mk.${beltMk}` : `Pipe Mk.${pipeMk}`}`,
-      })
-    }
-  }
+  const { links, junctions, labels, height } = complexWiring(
+    plan,
+    unitsOf,
+    itemName,
+    gridHeight,
+    props.layout,
+  )
 
   // Every machine but the last runs at the stage's max clock; the last one
   // takes the remainder. Recovered from the stage totals.
@@ -419,11 +897,13 @@ function ComplexSchematic(props: Props) {
       role="img"
       aria-label="Factory schematic (complex)"
     >
+      <BeltMarkers />
       {links.map((l, i) => (
         <path
           key={`l${i}`}
-          className={`edge edge--${l.transport}`}
-          d={`M ${l.x1} ${l.y1} C ${l.x1 + 40} ${l.y1}, ${l.x2 - 40} ${l.y2}, ${l.x2} ${l.y2}`}
+          className={`edge edge--${l.loop ? 'loop' : l.transport}`}
+          markerMid={`url(#arrow-${l.loop ? 'loop' : l.transport})`}
+          d={beltPath(l.x1, l.y1, l.x2, l.y2, 40)}
         />
       ))}
       {labels.map((lb, i) => (
@@ -434,15 +914,29 @@ function ComplexSchematic(props: Props) {
           <text className="edge-label edge-label--transport" x={lb.x} y={lb.y + 12}>
             {lb.sub}
           </text>
+          {lb.note && (
+            <text className="edge-label edge-label--loop" x={lb.x} y={lb.y + 24}>
+              {lb.note}
+            </text>
+          )}
         </g>
       ))}
-      {junctions.map((j, i) => (
-        <g key={`j${i}`} className={`junction junction--${j.kind}`}>
-          <rect x={j.x} y={j.y} width={NODE} height={NODE} rx={4} />
-          <text x={j.x + NODE / 2} y={j.y + NODE / 2 + 4} textAnchor="middle">
+      {junctions.map((j) => (
+        <Draggable
+          key={j.key}
+          unit={{ key: j.key, auto: j.auto, x: j.x, y: j.y }}
+          className={`junction junction--${j.kind}${j.loop ? ' junction--loop' : ''}`}
+          scale={props.scale}
+          onMoveBox={props.onMoveBox}
+        >
+          {/* A square with 4 faces: the trunk takes one, the branches the rest. */}
+          <rect width={NODE} height={NODE} rx={4}>
+            <title>{`${j.kind} · ${j.ways}-way`}</title>
+          </rect>
+          <text x={NODE / 2} y={NODE / 2 + 4} textAnchor="middle">
             {j.kind === 'splitter' ? 'S' : 'M'}
           </text>
-        </g>
+        </Draggable>
       ))}
       {stageMeta.map(({ stage, units }) =>
         units.map((u, i) => (
