@@ -16,12 +16,18 @@ import {
   type ManualLayout,
   type Point,
 } from '../ui/manualLayout'
-import Schematic, { boxKeys, layoutSize, type ViewMode } from './Schematic'
+import Schematic, {
+  boxKeys,
+  layoutSize,
+  type ViewMode,
+  type WiringMode,
+} from './Schematic'
 
 interface Props {
   plan: Plan
   data: GameData
   viewMode: ViewMode
+  wiringMode: WiringMode
   /** Owned by the app, not by this component: an invalid input swaps the whole
    * viewport for the error panel, and state living here would die with it. */
   layout: ManualLayout
@@ -40,11 +46,15 @@ export default function SchematicViewport({
   plan,
   data,
   viewMode,
+  wiringMode,
   layout,
   onLayoutChange,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null)
-  const size = useMemo(() => layoutSize(plan, viewMode), [plan, viewMode])
+  const size = useMemo(
+    () => layoutSize(plan, viewMode, wiringMode),
+    [plan, viewMode, wiringMode],
+  )
   const [box, setBox] = useState({ w: 0, h: 0 })
   const [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 })
   const [isFull, setIsFull] = useState(false)
@@ -58,7 +68,10 @@ export default function SchematicViewport({
   // Replanning keeps whatever the user arranged, as long as the box is still
   // drawn: changing only an output rate leaves every box in place, while a
   // different chain drops the boxes it no longer has.
-  const keys = useMemo(() => boxKeys(plan, viewMode), [plan, viewMode])
+  const keys = useMemo(
+    () => boxKeys(plan, viewMode, wiringMode),
+    [plan, viewMode, wiringMode],
+  )
   const layoutRef = useRef(layout)
   layoutRef.current = layout
   useEffect(() => {
@@ -92,12 +105,12 @@ export default function SchematicViewport({
   // A new plan is a new drawing: re-fit it and hand control back to autofit.
   useEffect(() => {
     touched.current = false
-  }, [size.width, size.height, viewMode])
+  }, [size.width, size.height, viewMode, wiringMode])
 
   useEffect(() => {
     if (touched.current) return
     setView(fitView(size.width, size.height, box.w, box.h))
-  }, [size.width, size.height, box.w, box.h, viewMode])
+  }, [size.width, size.height, box.w, box.h, viewMode, wiringMode])
 
   // Wheel must be non-passive to preventDefault, which React's onWheel is not.
   useEffect(() => {
@@ -187,6 +200,7 @@ export default function SchematicViewport({
         plan={plan}
         data={data}
         viewMode={viewMode}
+        wiringMode={wiringMode}
         viewBox={viewBox(view, box.w, box.h)}
         layout={layout}
         onMoveBox={onMoveBox}

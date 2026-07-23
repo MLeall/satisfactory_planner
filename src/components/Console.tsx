@@ -7,7 +7,7 @@ import type {
   PowerShards,
 } from '../ui/plannerState'
 import { RESOURCE_OPTIONS, type Planner } from '../ui/usePlanner'
-import type { ViewMode } from './Schematic'
+import type { ViewMode, WiringMode } from './Schematic'
 
 const PURITIES: Purity[] = ['impure', 'normal', 'pure']
 
@@ -47,7 +47,7 @@ function Segmented<T extends string | number>({
 export default function Console({ planner }: { planner: Planner }) {
   const { state, patch, outputs, targetOptions, recipeChoices, maxRates } =
     planner
-  const { nodes, buildMode, powerShards, viewMode } = state
+  const { nodes, buildMode, powerShards, viewMode, wiringMode } = state
 
   const updateNode = (key: number, change: Partial<NodeRow>) =>
     patch({ nodes: nodes.map((n) => (n.key === key ? { ...n, ...change } : n)) })
@@ -299,6 +299,23 @@ export default function Console({ planner }: { planner: Planner }) {
             ? 'Compact: machines grouped per stage with counts.'
             : 'Every machine drawn individually, wired through real Splitters and Mergers: one belt in and up to three out, or three in and one out.'}
         </p>
+        {viewMode === 'complex' && (
+          <>
+            <Segmented<WiringMode>
+              value={wiringMode}
+              options={[
+                { value: 'tree', label: 'Tree' },
+                { value: 'manifold', label: 'Manifold' },
+              ]}
+              onPick={(v) => patch({ wiringMode: v })}
+            />
+            <p className="recipe-note">
+              {wiringMode === 'tree'
+                ? 'A balanced tree of 2- and 3-way junctions: every belt is divided equally, so a machine count that factors into 2s and 3s comes out perfectly even.'
+                : 'The plain manifold everyone builds: a single bus taps one machine per junction and passes the rest along. Fewer junctions, and belt backpressure evens the machines out.'}
+            </p>
+          </>
+        )}
       </section>
 
       {recipeChoices.length > 0 && (

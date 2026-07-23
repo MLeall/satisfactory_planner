@@ -6,11 +6,16 @@ import { junctionTree, treeLevels, type JunctionNode } from '../ui/junctions'
 import type { ManualLayout, Point } from '../ui/manualLayout'
 
 export type ViewMode = 'standard' | 'complex'
+/** How the Complex view wires a stage's machines together: a balanced tree of
+ * Splitters/Mergers, or the plain linear manifold everyone actually builds. */
+export type WiringMode = 'tree' | 'manifold'
 
 interface Props {
   plan: Plan
   data: GameData
   viewMode: ViewMode
+  /** Only meaningful when viewMode is 'complex'. Defaults to a tree. */
+  wiringMode?: WiringMode
   /** Pan/zoom window supplied by the viewport. Absent means draw at intrinsic
    * size, which is what the render tests and a plain static export want. */
   viewBox?: string
@@ -276,35 +281,44 @@ function Draggable({
 }
 
 /** The wiring a plan draws in the complex view, for tests and for sizing. */
-export function complexLayout(plan: Plan, layout: ManualLayout = {}): Wiring {
-  const m = complexMetrics(plan)
+export function complexLayout(
+  plan: Plan,
+  layout: ManualLayout = {},
+  wiringMode: WiringMode = 'tree',
+): Wiring {
+  const m = complexMetrics(plan, wiringMode)
   const g = grid(plan, m, complexUnitCount, true, layout)
-  return complexWiring(plan, g.unitsOf, (id) => id, layout)
+  return complexWiring(plan, g.unitsOf, (id) => id, layout, wiringMode)
 }
 
 /** Intrinsic size of the drawing, so the viewport can fit it before render. */
 export function layoutSize(
   plan: Plan,
   viewMode: ViewMode,
+  wiringMode: WiringMode = 'tree',
 ): { width: number; height: number } {
   const { width, height } =
     viewMode === 'complex'
-      ? grid(plan, complexMetrics(plan), complexUnitCount, true)
+      ? grid(plan, complexMetrics(plan, wiringMode), complexUnitCount, true)
       : grid(plan, STANDARD, () => 1, false)
   return { width, height }
 }
 
 /** Every box key the current plan draws, so stale overrides can be pruned. */
-export function boxKeys(plan: Plan, viewMode: ViewMode): Set<string> {
+export function boxKeys(
+  plan: Plan,
+  viewMode: ViewMode,
+  wiringMode: WiringMode = 'tree',
+): Set<string> {
   const multi = viewMode === 'complex'
   const { unitsOf } = multi
-    ? grid(plan, complexMetrics(plan), complexUnitCount, true)
+    ? grid(plan, complexMetrics(plan, wiringMode), complexUnitCount, true)
     : grid(plan, STANDARD, () => 1, false)
   const keys = new Set<string>()
   for (const units of unitsOf.values()) for (const u of units) keys.add(u.key)
   // Splitters and Mergers are draggable too, so their overrides must survive
   // the prune that follows a replan.
-  if (multi) for (const j of complexLayout(plan).junctions) keys.add(j.key)
+  if (multi) for (const j of complexLayout(plan, {}, wiringMode).junctions) keys.add(j.key)
   return keys
 }
 
@@ -414,29 +428,33 @@ const COMPLEX: Metrics = { w: CW, h: CH, xgap: 300, ygap: 18, pad: 34 }
 const NODE = 30 // splitter / merger square
 
 /** How many individual machines a stage expands into. */
-const complexUnitCount = (s: Stage) =>
+export const complexUnitCount = (s: Stage) =>
   s.kind === 'storage' ? 1 : Math.max(1, s.machinesBuilt)
 
 /**
  * The gap between two columns has to hold a Merger tree, the Splitter that
  * divides the trunk between destinations, and a Splitter tree, all in series.
  * A 16-machine stage needs four Merger levels on its own, so a fixed gap either
- * cramps big plans or stretches small ones; size it from the plan instead.
+ * cramps big plans or stretches small ones; size it from the plan instead. A
+ * manifold is a single column of junctions each side, however tall the stage,
+ * so its horizontal reach is one level whatever the machine count.
  */
-function complexMetrics(plan: Plan): Metrics {
+function complexMetrics(plan: Plan, wiringMode: WiringMode): Metrics {
   const units = new Map(plan.stages.map((s) => [s.id, complexUnitCount(s)]))
   const destinations = new Map<string, number>()
   for (const e of plan.edges) {
     destinations.set(e.from, (destinations.get(e.from) ?? 0) + 1)
   }
+  const busLevels = (n: number) =>
+    wiringMode === 'manifold' ? (n > 1 ? 1 : 0) : treeLevels(junctionTree(n))
   let levels = 1
   for (const e of plan.edges) {
     const fanout = destinations.get(e.from) ?? 1
     levels = Math.max(
       levels,
-      treeLevels(junctionTree(units.get(e.from) ?? 1)) +
+      busLevels(units.get(e.from) ?? 1) +
         (fanout > 1 ? treeLevels(junctionTree(fanout)) : 0) +
-        treeLevels(junctionTree(units.get(e.to) ?? 1)),
+        busLevels(units.get(e.to) ?? 1),
     )
   }
   return { ...COMPLEX, xgap: Math.max(COMPLEX.xgap, (levels + 1) * LEVEL) }
@@ -593,6 +611,89 @@ function wire(
   return place(tree, '0')
 }
 
+/**
+ * Draw a manifold: one 2-way junction per machine but the last, each tapping a
+ * single machine off a straight bus and passing the rest along to the next. It
+ * is the plain build most factories use, and it leans on belt backpressure to
+ * even the machines out where the tree divides the belt equally by construction.
+ *
+ * `ports` are the machine faces top to bottom; `edgeX`/`dir` mean the same as in
+ * `wire`. Returns the trunk Face, where the run joins the bus.
+ */
+function manifoldWire(
+  ports: Face[],
+  kind: 'splitter' | 'merger',
+  edgeX: number,
+  dir: 1 | -1,
+  transport: 'belt' | 'pipe',
+  junctions: CJunction[],
+  links: CLink[],
+  keyBase: string,
+  layout: ManualLayout,
+): Face {
+  const n = ports.length
+  if (n <= 1) return ports[0]
+
+  // The column of squares sits one level off the machines, on the trunk side.
+  const busX = dir > 0 ? edgeX + (LEVEL - NODE) : edgeX - LEVEL
+
+  // Square i taps machine i. Placed off its own auto so a drag on one never
+  // shifts the rest of the bus; belts read the current face positions.
+  const place = (i: number) => {
+    const key = `${keyBase}/m${i}`
+    const auto = { x: busX, y: ports[i].auto.y - NODE / 2 }
+    const pos = layout[key] ?? auto
+    return {
+      key,
+      auto,
+      pos,
+      face: (side: FaceSide): Face => ({
+        pos: facePoint(pos, side),
+        auto: facePoint(auto, side),
+      }),
+    }
+  }
+  const nodes = Array.from({ length: n - 1 }, (_, i) => place(i))
+  const link = (a: Point, b: Point) =>
+    links.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, transport })
+
+  if (kind === 'splitter') {
+    nodes.forEach((node, i) => {
+      // The trunk enters the top square from its side; every square after it
+      // takes the run from the one above through its top face.
+      const inSide: FaceSide = i === 0 ? 'left' : 'top'
+      const branch = node.face('right')
+      const cont = node.face('bottom')
+      junctions.push({
+        key: node.key, x: node.pos.x, y: node.pos.y, auto: node.auto,
+        kind: 'splitter', ways: 2,
+        inPort: node.face(inSide).pos, outPort: cont.pos,
+        inSide, outSide: 'bottom',
+      })
+      link(branch.pos, ports[i].pos)
+      // Pass the rest straight down: to the next square, or to the last machine.
+      link(cont.pos, i < n - 2 ? nodes[i + 1].face('top').pos : ports[n - 1].pos)
+    })
+    return nodes[0].face('left')
+  }
+
+  // Merger: the mirror. Every square merges its machine with the run climbing
+  // from below and sends it up; the top square hands the trunk out sideways.
+  nodes.forEach((node, i) => {
+    const outSide: FaceSide = i === 0 ? 'right' : 'top'
+    junctions.push({
+      key: node.key, x: node.pos.x, y: node.pos.y, auto: node.auto,
+      kind: 'merger', ways: 2,
+      inPort: node.face('left').pos, outPort: node.face(outSide).pos,
+      inSide: 'left', outSide,
+    })
+    link(ports[i].pos, node.face('left').pos)
+    // The belt arriving from below: the next square's output, or the last machine.
+    link(i < n - 2 ? nodes[i + 1].face('top').pos : ports[n - 1].pos, node.face('bottom').pos)
+  })
+  return nodes[0].face('right')
+}
+
 interface CLabel {
   x: number
   y: number
@@ -624,6 +725,7 @@ export function complexWiring(
   unitsOf: Map<string, Unit[]>,
   itemName: (id: string) => string,
   layout: ManualLayout = {},
+  wiringMode: WiringMode = 'tree',
 ): Wiring {
   const links: CLink[] = []
   const junctions: CJunction[] = []
@@ -648,18 +750,17 @@ export function complexWiring(
     const transport = edges[0].transport
 
     // One trunk out of the stage, whatever it goes on to feed.
-    const trunk = wire(
-      producers.map(right),
-      junctionTree(producers.length),
-      'merger',
-      Math.max(...producers.map((u) => u.x)) + CW,
-      1,
-      transport,
-      junctions,
-      links,
-      `merge:${fromId}`,
-      layout,
-    )
+    const mergeEdge = Math.max(...producers.map((u) => u.x)) + CW
+    const trunk =
+      wiringMode === 'manifold'
+        ? manifoldWire(
+            producers.map(right), 'merger', mergeEdge, 1, transport,
+            junctions, links, `merge:${fromId}`, layout,
+          )
+        : wire(
+            producers.map(right), junctionTree(producers.length), 'merger',
+            mergeEdge, 1, transport, junctions, links, `merge:${fromId}`, layout,
+          )
 
     const heads: Face[] = []
     for (const e of edges) {
@@ -671,18 +772,16 @@ export function complexWiring(
       const toCol = consumers[0].x - lane * LANE_GAP
       const run = `${fromId}>${e.to}:${e.item}`
 
-      const head = wire(
-        consumers.map(left),
-        junctionTree(consumers.length),
-        'splitter',
-        toCol,
-        -1,
-        transport,
-        junctions,
-        links,
-        `split:${run}`,
-        layout,
-      )
+      const head =
+        wiringMode === 'manifold'
+          ? manifoldWire(
+              consumers.map(left), 'splitter', toCol, -1, transport,
+              junctions, links, `split:${run}`, layout,
+            )
+          : wire(
+              consumers.map(left), junctionTree(consumers.length), 'splitter',
+              toCol, -1, transport, junctions, links, `split:${run}`, layout,
+            )
 
       heads.push(head)
 
@@ -734,9 +833,10 @@ function ComplexSchematic(props: Props) {
   const { plan, data } = props
   const itemName = (id: string) => data.items.get(id)?.name ?? id
 
+  const wiringMode = props.wiringMode ?? 'tree'
   const { width, height, unitsOf, stages: stageMeta } = grid(
     plan,
-    complexMetrics(plan),
+    complexMetrics(plan, wiringMode),
     complexUnitCount,
     true,
     props.layout,
@@ -747,6 +847,7 @@ function ComplexSchematic(props: Props) {
     unitsOf,
     itemName,
     props.layout,
+    wiringMode,
   )
 
   // Every machine but the last runs at the stage's max clock; the last one

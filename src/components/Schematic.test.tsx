@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
-import Schematic, { boxKeys, complexLayout, layoutSize } from './Schematic'
+import Schematic, {
+  boxKeys,
+  complexLayout,
+  complexUnitCount,
+  layoutSize,
+} from './Schematic'
 import Breakdown from './Breakdown'
 import { loadGameData } from '../data/loader'
 import { solve } from '../engine/solve'
@@ -248,6 +253,111 @@ describe('complex view: what the game can actually build', () => {
     for (const l of links) expect(l.x2).toBeGreaterThanOrEqual(l.x1)
     // Five machines are one Splitter into a 3-way and a 2-way, never more.
     for (const j of junctions) expect(j.ways).toBeLessThanOrEqual(3)
+  })
+})
+
+describe('complex view: manifold wiring', () => {
+  const plans = [
+    plan([{ item: 'Desc_IronPlate_C', rate: 95 }]), // 5 smelters, 5 constructors
+    plan([{ item: 'Desc_IronPlateReinforced_C', rate: 40 }]),
+    plan(
+      [
+        { item: 'Desc_IronPlate_C', rate: 20 },
+        { item: 'Desc_IronScrew_C', rate: 50 },
+      ],
+      true,
+    ),
+  ]
+
+  const near = (a: number, b: number) => Math.abs(a - b) < 0.5
+  const touching = (
+    links: ReturnType<typeof complexLayout>['links'],
+    p: { x: number; y: number },
+  ) =>
+    links.filter(
+      (l) =>
+        (near(l.x1, p.x) && near(l.y1, p.y)) ||
+        (near(l.x2, p.x) && near(l.y2, p.y)),
+    ).length
+
+  it('never uses a junction wider than 2 ways: a manifold is all straight taps', () => {
+    for (const p of plans) {
+      const { junctions } = complexLayout(p, {}, 'manifold')
+      expect(junctions.length).toBeGreaterThan(0)
+      for (const j of junctions) expect(j.ways).toBe(2)
+    }
+  })
+
+  it('taps a stage of n machines with exactly n-1 junctions on the split side', () => {
+    // One machine peeled off per junction, so the count is fixed by the machine
+    // count and nothing else. A single machine needs no junction at all.
+    for (const p of plans) {
+      const { junctions } = complexLayout(p, {}, 'manifold')
+      const machines = new Map(p.stages.map((s) => [s.id, complexUnitCount(s)]))
+      for (const e of p.edges) {
+        const run = `split:${e.from}>${e.to}:${e.item}/`
+        const forRun = junctions.filter((j) => j.key.startsWith(run))
+        const n = machines.get(e.to) ?? 1
+        expect(forRun.length).toBe(Math.max(0, n - 1))
+      }
+    }
+  })
+
+  it('keeps one input per Splitter and one output per Merger', () => {
+    for (const p of plans) {
+      const { links, junctions } = complexLayout(p, {}, 'manifold')
+      for (const j of junctions) {
+        if (j.kind === 'splitter') expect(touching(links, j.inPort)).toBe(1)
+        else expect(touching(links, j.outPort)).toBe(1)
+      }
+    }
+  })
+
+  it('never runs a belt through a junction to reach the far side', () => {
+    const outward = (
+      side: string,
+      port: { x: number; y: number },
+      other: { x: number; y: number },
+    ) => {
+      const slack = 0.5
+      if (side === 'left') return other.x <= port.x + slack
+      if (side === 'right') return other.x >= port.x - slack
+      if (side === 'top') return other.y <= port.y + slack
+      return other.y >= port.y - slack
+    }
+    for (const p of plans) {
+      const { links, junctions } = complexLayout(p, {}, 'manifold')
+      for (const j of junctions) {
+        for (const l of links) {
+          const ends = [
+            { at: { x: l.x1, y: l.y1 }, far: { x: l.x2, y: l.y2 } },
+            { at: { x: l.x2, y: l.y2 }, far: { x: l.x1, y: l.y1 } },
+          ]
+          for (const port of ['in', 'out'] as const) {
+            const p0 = port === 'in' ? j.inPort : j.outPort
+            const side = port === 'in' ? j.inSide : j.outSide
+            for (const e of ends) {
+              if (near(e.at.x, p0.x) && near(e.at.y, p0.y)) {
+                expect(outward(side, p0, e.far)).toBe(true)
+              }
+            }
+          }
+        }
+      }
+    }
+  })
+
+  it('renders the manifold view without throwing', () => {
+    const html = renderToStaticMarkup(
+      <Schematic
+        plan={plans[0]}
+        data={data}
+        viewMode="complex"
+        wiringMode="manifold"
+      />,
+    )
+    expect(html).toContain('<svg')
+    expect(html).toMatch(/junction--(splitter|merger)/)
   })
 })
 

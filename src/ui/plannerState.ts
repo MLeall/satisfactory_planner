@@ -1,7 +1,7 @@
 // The console's state: one plain object, so persisting it, sharing it and
 // resetting it are all the same operation on the same value.
 
-import type { ViewMode } from '../components/Schematic'
+import type { ViewMode, WiringMode } from '../components/Schematic'
 import type { PlanInput } from '../engine/solve'
 import type { Purity } from '../engine/types'
 import type { ManualLayout } from './manualLayout'
@@ -35,6 +35,8 @@ export interface PlannerState {
   buildMode: BuildMode
   powerShards: PowerShards
   viewMode: ViewMode
+  /** How the Complex view wires machines together. */
+  wiringMode: WiringMode
   layout: ManualLayout
 }
 
@@ -51,6 +53,7 @@ export function defaults(): PlannerState {
     buildMode: 'exact',
     powerShards: 0,
     viewMode: 'standard',
+    wiringMode: 'tree',
     layout: {},
   }
 }
