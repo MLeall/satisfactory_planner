@@ -237,19 +237,17 @@ describe('complex view: what the game can actually build', () => {
     }
   })
 
-  it('draws a loop when a stage has an awkward machine count', () => {
-    // 95/min of plates needs 5 constructors, which no plain tree divides evenly.
+  it('wires an awkward machine count with a plain tree, no return belt', () => {
+    // 95/min of plates needs 5 constructors, which no tree divides evenly. The
+    // machines are still wired straight through: the clock evens the rates out,
+    // so there is nothing here for a feedback loop to fix.
     const five = plan([{ item: 'Desc_IronPlate_C', rate: 95 }])
     expect(five.stages.some((s) => s.machinesBuilt === 5)).toBe(true)
-    const { links, labels } = complexLayout(five)
-    expect(links.some((l) => l.loop)).toBe(true)
-    expect(labels.some((lb) => lb.note?.includes('1:5 balancer'))).toBe(true)
-  })
-
-  it('draws no loop when the machine count already divides evenly', () => {
-    const six = plan([{ item: 'Desc_IronPlate_C', rate: 110 }])
-    expect(six.stages.some((s) => s.machinesBuilt === 6)).toBe(true)
-    expect(complexLayout(six).links.some((l) => l.loop)).toBe(false)
+    const { links, junctions } = complexLayout(five)
+    // Every belt runs forward, left to right through the columns.
+    for (const l of links) expect(l.x2).toBeGreaterThanOrEqual(l.x1)
+    // Five machines are one Splitter into a 3-way and a 2-way, never more.
+    for (const j of junctions) expect(j.ways).toBeLessThanOrEqual(3)
   })
 })
 
@@ -336,7 +334,7 @@ describe('belts meet the face they come from', () => {
   // port, but on screen the square reads as having an extra output and no
   // input at all.
   const plans = [
-    plan([{ item: 'Desc_IronPlate_C', rate: 95 }]), // 1:5 balancers, loop belts
+    plan([{ item: 'Desc_IronPlate_C', rate: 95 }]), // 5 machines: an uneven tree
     plan([{ item: 'Desc_IronPlateReinforced_C', rate: 40 }]),
     plan(
       [
@@ -382,41 +380,6 @@ describe('belts meet the face they come from', () => {
               }).toEqual({ junction: `${j.key} ${side} ${port}`, outward: true })
             }
           }
-        }
-      }
-    }
-  })
-
-  it('points a returning belt back towards the head of the tree', () => {
-    // Belts are stored the way they flow, which is what orients the arrowheads.
-    // A loop belt runs against the forward flow, so it must be stored that way
-    // too rather than normalised left-to-right.
-    const { links, junctions } = complexLayout(plans[0])
-    const fb = junctions.find((j) => j.key.startsWith('sfb:'))!
-    const incoming = links.filter(
-      (l) => Math.abs(l.x2 - fb.inPort.x) < 0.5 && Math.abs(l.y2 - fb.inPort.y) < 0.5,
-    )
-    expect(incoming).toHaveLength(1)
-    // It ends at the Splitter, having started further right, out in the return
-    // lane: stored end-to-end against the forward flow.
-    expect(incoming[0].x1).toBeGreaterThan(incoming[0].x2)
-    expect(incoming[0].loop).toBe(true)
-  })
-})
-
-describe('the return Splitter clears what it feeds', () => {
-  it('sits below every Merger it feeds, on every machine count', () => {
-    // Its belts leave through the top face, so a Merger level with it (or under
-    // it) would need a belt that loops back around the square to arrive.
-    for (const rate of [95, 130, 150, 190, 210, 250]) {
-      const p = plan([{ item: 'Desc_IronPlate_C', rate }])
-      const { junctions } = complexLayout(p)
-      for (const fb of junctions.filter((j) => j.key.startsWith('sfb:'))) {
-        const run = fb.key.slice('sfb:'.length)
-        const fed = junctions.filter((j) => j.key.startsWith(`bmerge:${run}#`))
-        expect(fed.length).toBeGreaterThan(0)
-        for (const m of fed) {
-          expect(fb.outPort.y - m.inPort.y).toBeGreaterThanOrEqual(30)
         }
       }
     }

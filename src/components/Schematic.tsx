@@ -2,12 +2,7 @@ import { useRef } from 'react'
 import type { Plan, Stage } from '../engine/solve'
 import type { GameData } from '../engine/types'
 import { fmt } from '../ui/format'
-import {
-  balancer,
-  junctionTree,
-  treeLevels,
-  type JunctionNode,
-} from '../ui/junctions'
+import { junctionTree, treeLevels, type JunctionNode } from '../ui/junctions'
 import type { ManualLayout, Point } from '../ui/manualLayout'
 
 export type ViewMode = 'standard' | 'complex'
@@ -30,8 +25,7 @@ interface Props {
 /**
  * A belt as a curve broken into several cubic pieces. One long curve would do
  * visually, but `marker-mid` only puts an arrow where two pieces meet, and the
- * arrows are what say which way the belt runs when the flow animation is off
- * (or, on a loop belt, runs against the eye's expectation).
+ * arrows are what say which way the belt runs when the flow animation is off.
  */
 function beltPath(
   x1: number,
@@ -77,7 +71,7 @@ function beltPath(
 function BeltMarkers() {
   return (
     <defs>
-      {(['belt', 'pipe', 'loop'] as const).map((kind) => (
+      {(['belt', 'pipe'] as const).map((kind) => (
         <marker
           key={kind}
           id={`arrow-${kind}`}
@@ -281,25 +275,23 @@ function Draggable({
   )
 }
 
-/** Intrinsic size of the drawing, so the viewport can fit it before render. */
 /** The wiring a plan draws in the complex view, for tests and for sizing. */
 export function complexLayout(plan: Plan, layout: ManualLayout = {}): Wiring {
   const m = complexMetrics(plan)
   const g = grid(plan, m, complexUnitCount, true, layout)
-  return complexWiring(plan, g.unitsOf, (id) => id, g.height, layout)
+  return complexWiring(plan, g.unitsOf, (id) => id, layout)
 }
 
+/** Intrinsic size of the drawing, so the viewport can fit it before render. */
 export function layoutSize(
   plan: Plan,
   viewMode: ViewMode,
 ): { width: number; height: number } {
-  if (viewMode !== 'complex') {
-    const { width, height } = grid(plan, STANDARD, () => 1, false)
-    return { width, height }
-  }
-  const g = grid(plan, complexMetrics(plan), complexUnitCount, true)
-  // A balancer loop hangs below the columns, so the grid height is a floor.
-  return { width: g.width, height: complexLayout(plan).height }
+  const { width, height } =
+    viewMode === 'complex'
+      ? grid(plan, complexMetrics(plan), complexUnitCount, true)
+      : grid(plan, STANDARD, () => 1, false)
+  return { width, height }
 }
 
 /** Every box key the current plan draws, so stale overrides can be pruned. */
@@ -439,14 +431,12 @@ function complexMetrics(plan: Plan): Metrics {
   }
   let levels = 1
   for (const e of plan.edges) {
-    const bal = balancer(units.get(e.to) ?? 1)
     const fanout = destinations.get(e.from) ?? 1
     levels = Math.max(
       levels,
       treeLevels(junctionTree(units.get(e.from) ?? 1)) +
         (fanout > 1 ? treeLevels(junctionTree(fanout)) : 0) +
-        treeLevels(bal.tree) +
-        (bal.loopback.length > 0 ? 1 : 0),
+        treeLevels(junctionTree(units.get(e.to) ?? 1)),
     )
   }
   return { ...COMPLEX, xgap: Math.max(COMPLEX.xgap, (levels + 1) * LEVEL) }
@@ -464,8 +454,6 @@ export interface CLink {
   x2: number
   y2: number
   transport: 'belt' | 'pipe'
-  /** A leg of the balancer going back round, drawn apart from the forward flow */
-  loop?: boolean
 }
 
 export interface CJunction {
@@ -484,8 +472,6 @@ export interface CJunction {
   outPort: Point
   inSide: FaceSide
   outSide: FaceSide
-  /** Part of a balancer's return path rather than the forward flow */
-  loop?: boolean
 }
 
 /** Where a belt attaches, and where it would have attached had nobody dragged
@@ -522,7 +508,6 @@ function placeJunction(
   branchSide: FaceSide,
   layout: ManualLayout,
   junctions: CJunction[],
-  loop = false,
 ): { trunk: Face; branch: Face } {
   const auto = rect
   const p = layout[key] ?? auto
@@ -543,7 +528,6 @@ function placeJunction(
     outPort: kind === 'merger' ? now.trunk : now.branch,
     inSide: kind === 'merger' ? branchSide : trunkSide,
     outSide: kind === 'merger' ? trunkSide : branchSide,
-    loop,
   })
   return {
     trunk: { pos: now.trunk, auto: was.trunk },
@@ -574,7 +558,6 @@ function wire(
   links: CLink[],
   keyBase: string,
   layout: ManualLayout,
-  loop = false,
 ): Face {
   const place = (node: JunctionNode, path: string): Face => {
     if (node.children.length === 0) return ports[node.leaves[0]]
@@ -594,7 +577,6 @@ function wire(
       dir > 0 ? 'left' : 'right',
       layout,
       junctions,
-      loop,
     )
     node.children.forEach((child, i) => {
       const c = place(child, `${path}.${i}`).pos
@@ -602,8 +584,8 @@ function wire(
       // Splitter towards them. The arrowheads read straight off that.
       links.push(
         kind === 'merger'
-          ? { x1: c.x, y1: c.y, x2: branch.pos.x, y2: branch.pos.y, transport, loop }
-          : { x1: branch.pos.x, y1: branch.pos.y, x2: c.x, y2: c.y, transport, loop },
+          ? { x1: c.x, y1: c.y, x2: branch.pos.x, y2: branch.pos.y, transport }
+          : { x1: branch.pos.x, y1: branch.pos.y, x2: c.x, y2: c.y, transport },
       )
     })
     return trunk
@@ -616,19 +598,14 @@ interface CLabel {
   y: number
   text: string
   sub: string
-  note?: string
 }
 
 export interface Wiring {
   links: CLink[]
   junctions: CJunction[]
   labels: CLabel[]
-  /** Drawing height, grown when a balancer loop hangs below the columns. */
-  height: number
 }
 
-/** Vertical room one returning leg of a balancer takes below the machines. */
-const LOOP_STEP = 30
 /** Horizontal stagger between the Splitter lines of two different items. */
 const LANE_GAP = 20
 
@@ -639,21 +616,18 @@ const LANE_GAP = 20
  *
  * A machine has a single output belt, so a stage is merged exactly once no
  * matter how many stages it feeds, and a Splitter (never the Merger) is what
- * divides that trunk between them. Where a stage has an awkward machine count,
- * the Splitter tree is overbuilt and the spare legs loop back, which is the
- * only way the game divides a belt into 5, 7, 10 … equal parts.
+ * divides that trunk between them. A machine count a tree cannot divide evenly
+ * is not the wiring's problem: the clocks settle the rates.
  */
 export function complexWiring(
   plan: Plan,
   unitsOf: Map<string, Unit[]>,
   itemName: (id: string) => string,
-  gridHeight: number,
   layout: ManualLayout = {},
 ): Wiring {
   const links: CLink[] = []
   const junctions: CJunction[] = []
   const labels: CLabel[] = []
-  let lowest = 0
 
   // A machine port is wherever the machine is: dragging a machine is meant to
   // take its belts and its Splitters with it.
@@ -695,120 +669,20 @@ export function complexWiring(
       // of the other.
       const lane = (inbound.get(e.to) ?? []).indexOf(e.item)
       const toCol = consumers[0].x - lane * LANE_GAP
-      const bal = balancer(consumers.length)
-
-      // Spare legs hang below the machines, in the slot a machine would take.
-      const bottom = Math.max(...consumers.map((u) => u.y)) + CH / 2
-      const loopPorts = bal.loopback.map((_, i) =>
-        port({ x: toCol, y: bottom + LOOP_STEP * (i + 1) }),
-      )
-      lowest = Math.max(lowest, ...loopPorts.map((p) => p.pos.y))
-
-      const ports = [...consumers.map(left), ...loopPorts]
       const run = `${fromId}>${e.to}:${e.item}`
-      let head: Face
 
-      if (loopPorts.length === 0) {
-        head = wire(
-          ports, bal.tree, 'splitter', toCol, -1, transport, junctions, links,
-          `split:${run}`, layout,
-        )
-      } else {
-        // The build the 1:5 balancer is drawn from: the trunk is divided by the
-        // root Splitter, each branch is topped up by its own Merger, and the
-        // returning legs are divided by a Splitter into one share per branch.
-        // Every branch then carries exactly what its leg count needs.
-        const branches = bal.tree.children.map((b, i) =>
-          wire(
-            ports, b, 'splitter', toCol, -1, transport, junctions, links,
-            `split:${run}#${i}`, layout,
-          ),
-        )
-        // One Merger per branch, joining the trunk share to the loop share.
-        const mergers = branches.map((b, i) => {
-          const { trunk: out, branch: into } = placeJunction(
-            `bmerge:${run}#${i}`,
-            'merger',
-            2,
-            { x: b.auto.x - LEVEL - NODE, y: b.auto.y - NODE / 2 },
-            'right',
-            'left',
-            layout,
-            junctions,
-          )
-          links.push({ x1: out.pos.x, y1: out.pos.y, x2: b.pos.x, y2: b.pos.y, transport })
-          return into
-        })
-
-        const ys = mergers.map((m) => m.auto.y)
-        const rootX = Math.min(...mergers.map((m) => m.auto.x)) - LEVEL
-        const root = placeJunction(
-          `sroot:${run}`,
-          'splitter',
-          mergers.length,
-          { x: rootX, y: (Math.min(...ys) + Math.max(...ys)) / 2 - NODE / 2 },
-          'left',
-          'right',
-          layout,
-          junctions,
-        )
-        for (const m of mergers) {
-          links.push({
-            x1: root.branch.pos.x, y1: root.branch.pos.y,
-            x2: m.pos.x, y2: m.pos.y,
-            transport,
-          })
-        }
-        head = root.trunk
-
-        // The legs that came back round, gathered and shared out again.
-        const collected: Face =
-          bal.collector === null
-            ? loopPorts[0]
-            : wire(
-                loopPorts, bal.collector, 'merger', toCol, -1, transport,
-                junctions, links, `loop:${run}`, layout, true,
-              )
-        // The return runs right to left along the bottom lane and the branch
-        // Mergers are above, so this square takes its belt on the right face
-        // and feeds them out of the top one.
-        const fb = placeJunction(
-          `sfb:${run}`,
-          'splitter',
-          mergers.length,
-          {
-            // Clear of the return lane *and* of every Merger it feeds, so the
-            // belts out of its top face always climb rather than double back
-            // around the square.
-            x: rootX,
-            y:
-              Math.max(
-                ...loopPorts.map((p) => p.auto.y),
-                ...mergers.map((m) => m.auto.y),
-              ) +
-              LOOP_STEP -
-              NODE / 2,
-          },
-          'right',
-          'top',
-          layout,
-          junctions,
-          true,
-        )
-        lowest = Math.max(lowest, fb.trunk.auto.y + NODE)
-        links.push({
-          x1: collected.pos.x, y1: collected.pos.y,
-          x2: fb.trunk.pos.x, y2: fb.trunk.pos.y,
-          transport, loop: true,
-        })
-        for (const m of mergers) {
-          links.push({
-            x1: fb.branch.pos.x, y1: fb.branch.pos.y,
-            x2: m.pos.x, y2: m.pos.y,
-            transport, loop: true,
-          })
-        }
-      }
+      const head = wire(
+        consumers.map(left),
+        junctionTree(consumers.length),
+        'splitter',
+        toCol,
+        -1,
+        transport,
+        junctions,
+        links,
+        `split:${run}`,
+        layout,
+      )
 
       heads.push(head)
 
@@ -819,10 +693,6 @@ export function complexWiring(
         y: (trunk.pos.y + head.pos.y) / 2 - 8,
         text: `${itemName(e.item)} · ${fmt(e.rate)}/min`,
         sub: `${e.lanes}× ${tier}`,
-        note:
-          bal.loopback.length > 0
-            ? `1:${consumers.length} balancer · ${fmt(e.rate * bal.feedbackRatio)}/min loops back`
-            : undefined,
       })
     }
 
@@ -857,30 +727,25 @@ export function complexWiring(
     }
   }
 
-  return {
-    links,
-    junctions,
-    labels,
-    height: Math.max(gridHeight, lowest + COMPLEX.pad),
-  }
+  return { links, junctions, labels }
 }
 
 function ComplexSchematic(props: Props) {
   const { plan, data } = props
   const itemName = (id: string) => data.items.get(id)?.name ?? id
 
-  const {
-    width,
-    height: gridHeight,
-    unitsOf,
-    stages: stageMeta,
-  } = grid(plan, complexMetrics(plan), complexUnitCount, true, props.layout)
+  const { width, height, unitsOf, stages: stageMeta } = grid(
+    plan,
+    complexMetrics(plan),
+    complexUnitCount,
+    true,
+    props.layout,
+  )
 
-  const { links, junctions, labels, height } = complexWiring(
+  const { links, junctions, labels } = complexWiring(
     plan,
     unitsOf,
     itemName,
-    gridHeight,
     props.layout,
   )
 
@@ -901,8 +766,8 @@ function ComplexSchematic(props: Props) {
       {links.map((l, i) => (
         <path
           key={`l${i}`}
-          className={`edge edge--${l.loop ? 'loop' : l.transport}`}
-          markerMid={`url(#arrow-${l.loop ? 'loop' : l.transport})`}
+          className={`edge edge--${l.transport}`}
+          markerMid={`url(#arrow-${l.transport})`}
           d={beltPath(l.x1, l.y1, l.x2, l.y2, 40)}
         />
       ))}
@@ -914,18 +779,13 @@ function ComplexSchematic(props: Props) {
           <text className="edge-label edge-label--transport" x={lb.x} y={lb.y + 12}>
             {lb.sub}
           </text>
-          {lb.note && (
-            <text className="edge-label edge-label--loop" x={lb.x} y={lb.y + 24}>
-              {lb.note}
-            </text>
-          )}
         </g>
       ))}
       {junctions.map((j) => (
         <Draggable
           key={j.key}
           unit={{ key: j.key, auto: j.auto, x: j.x, y: j.y }}
-          className={`junction junction--${j.kind}${j.loop ? ' junction--loop' : ''}`}
+          className={`junction junction--${j.kind}`}
           scale={props.scale}
           onMoveBox={props.onMoveBox}
         >

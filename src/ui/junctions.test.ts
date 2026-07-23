@@ -1,7 +1,5 @@
 import { describe, it, expect } from 'vitest'
 import {
-  balancedWidth,
-  balancer,
   junctionTree,
   leafShares,
   treeLevels,
@@ -52,8 +50,7 @@ describe('junctionTree: game-legal shape', () => {
   })
 
   it('splits a run of 6 two ways, then three ways', () => {
-    // Both divide 6 evenly, but 2-then-3 costs three squares against four, and
-    // it is the shape the 1:5 balancer everyone builds is based on.
+    // Both divide 6 evenly, but 2-then-3 costs three squares against four.
     const tree = junctionTree(6)
     expect(tree.children).toHaveLength(2)
     expect(tree.children.map((c) => c.leaves)).toEqual([
@@ -98,7 +95,8 @@ describe('leafShares: what each consumer actually receives', () => {
 
   it('reports an uneven split when n has a prime factor past 3', () => {
     // No tree of 2- and 3-way splitters can divide 5 evenly: every leaf share
-    // is 1/(2^a·3^b), and those never sum to five equal parts.
+    // is 1/(2^a·3^b), and those never sum to five equal parts. The tree is
+    // still what gets drawn; evening the machines out is the clock's job.
     for (const n of [5, 7, 10, 11]) expect(spread(n)).toBeGreaterThan(1)
   })
 
@@ -132,114 +130,6 @@ describe('leafShares: what each consumer actually receives', () => {
           expect(c.share).toBeCloseTo(j.share / j.children.length, 9)
         }
       }
-    }
-  })
-})
-
-describe('balancedWidth: how wide the tree has to be built', () => {
-  it('leaves a run alone when it already factors into 2s and 3s', () => {
-    for (const n of [1, 2, 3, 4, 6, 8, 9, 12, 16, 18, 24, 27, 36])
-      expect(balancedWidth(n)).toBe(n)
-  })
-
-  it('rounds up to the next such number otherwise', () => {
-    // The 1:5 balancer everybody builds is a 6-wide tree with one leg looped
-    // back; 1:7 is an 8-wide one, and so on.
-    expect(balancedWidth(5)).toBe(6)
-    expect(balancedWidth(7)).toBe(8)
-    expect(balancedWidth(10)).toBe(12)
-    expect(balancedWidth(11)).toBe(12)
-    expect(balancedWidth(13)).toBe(16)
-    expect(balancedWidth(19)).toBe(24)
-  })
-
-  it('is always a power-of-2-times-power-of-3 no smaller than n', () => {
-    for (let n = 1; n <= 200; n++) {
-      let w = balancedWidth(n)
-      expect(w).toBeGreaterThanOrEqual(n)
-      while (w % 2 === 0) w /= 2
-      while (w % 3 === 0) w /= 3
-      expect(w).toBe(1)
-    }
-  })
-})
-
-describe('balancer: an even split for any number of machines', () => {
-  it('needs no loop when the tree already divides evenly', () => {
-    for (const n of [1, 2, 3, 4, 6, 8, 9, 12]) {
-      const b = balancer(n)
-      expect(b.width).toBe(n)
-      expect(b.loopback).toEqual([])
-      expect(b.collector).toBeNull()
-    }
-  })
-
-  it('loops the leftover legs back, as the 1:5 balancer does', () => {
-    const b = balancer(5)
-    expect(b.width).toBe(6)
-    // The reference build: the trunk is split two ways, each half topped up by
-    // a Merger and then divided three ways, giving six legs of equal rate.
-    expect(b.tree.children).toHaveLength(2)
-    expect(b.tree.children.every((c) => c.children.length === 3)).toBe(true)
-    // Five legs feed machines, the sixth returns to the head of the tree.
-    expect(b.loopback).toEqual([5])
-    expect(b.collector).toBeNull() // a single leg needs no Merger to collect
-    expect(leafShares(6).every((s) => Math.abs(s - 1 / 6) < 1e-9)).toBe(true)
-  })
-
-  it('gives every machine exactly the same rate, for any count', () => {
-    for (let n = 1; n <= 60; n++) {
-      const b = balancer(n)
-      const shares = leafShares(b.width)
-      // Every leg of the tree is equal, so the n legs that reach a machine are
-      // equal too, whatever the loop returns.
-      for (const s of shares) expect(s).toBeCloseTo(1 / b.width, 9)
-      expect(b.loopback).toHaveLength(b.width - n)
-    }
-  })
-
-  it('states what the loop carries relative to the run', () => {
-    // A 1:5 balancer pushes 6/5 of the demand through the tree, 1/5 of it
-    // being the leg that comes back round.
-    expect(balancer(5).feedbackRatio).toBeCloseTo(1 / 5, 9)
-    expect(balancer(7).feedbackRatio).toBeCloseTo(1 / 7, 9)
-    expect(balancer(10).feedbackRatio).toBeCloseTo(2 / 10, 9)
-    expect(balancer(6).feedbackRatio).toBe(0)
-  })
-
-  it('feeds the loop back through one Merger per branch of the root', () => {
-    // The returning legs are divided by a Splitter into as many parts as the
-    // root has branches, one part joining each branch through its own Merger.
-    // That is what makes every branch receive an equal share.
-    for (const n of [5, 7, 10, 11, 13, 19]) {
-      const b = balancer(n)
-      const branches = b.tree.children.length
-      expect(branches).toBeGreaterThanOrEqual(2)
-      expect(branches).toBeLessThanOrEqual(3)
-      // Each branch carries the same number of legs, so an equal share is
-      // exactly what it needs.
-      const per = b.tree.children.map((c) => c.leaves.length)
-      expect(new Set(per).size).toBe(1)
-      expect(per[0] * branches).toBe(b.width)
-    }
-  })
-
-  it('collects several returning legs through Mergers', () => {
-    const b = balancer(10) // 12-wide tree, 2 legs come back
-    expect(b.loopback).toEqual([10, 11])
-    expect(b.collector).not.toBeNull()
-    expect(b.collector!.leaves).toEqual([0, 1])
-    expect(b.collector!.children).toHaveLength(2)
-  })
-
-  it('never wires a collecting Merger beyond 3 inbound belts', () => {
-    for (let n = 1; n <= 200; n++) {
-      const walk = (node: JunctionNode | null): void => {
-        if (!node || node.children.length === 0) return
-        expect(node.children.length).toBeLessThanOrEqual(3)
-        node.children.forEach(walk)
-      }
-      walk(balancer(n).collector)
     }
   })
 })

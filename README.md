@@ -31,12 +31,12 @@ Todas as informações ficam salvas no `localStorage` do navegador entre sessõe
 - **Compartilhamento sem backend**: o estado inteiro do console é serializado no *fragmento* da URL (nunca na query, então nada trafega até um servidor). Ao abrir um link compartilhado ele vence o que estiver salvo localmente, e o fragmento é consumido em seguida, para não ficar um link visível que envelhece a cada edição. Fragmento inválido ou adulterado cai silenciosamente no plano salvo.
 - **Zoom, pan e fullscreen** no floor plan: roda do mouse amplia sob o cursor, arrastar o fundo movimenta, e há um *fit* que reenquadra. Quando a Fullscreen API é negada (sem gesto de usuário, iframe sem permissão), cai num modo que cobre a página via CSS, então o botão nunca fica morto.
 - **Reposicionamento manual por drag and drop**: arraste qualquer máquina, Splitter ou Merger, e as esteiras acompanham. Arrastar uma máquina leva junto as junções que a servem; arrastar uma junção move só ela, sem empurrar o resto da árvore. As posições são guardadas por caixa, não por plano: mexer só nas taxas de saída preserva todo o arranjo, enquanto trocar a cadeia descarta apenas as caixas que deixaram de existir. O botão ↺ desfaz o arranjo.
-- **Leitura do fluxo**: toda esteira é tracejada e animada no sentido em que corre, com setas fixas ao longo do caminho, então a direção continua legível com a animação desligada. As esteiras de retorno do balanceador têm cor própria, por correrem contra o fluxo geral.
+- **Leitura do fluxo**: toda esteira é tracejada e animada no sentido em que corre, com setas fixas ao longo do caminho, então a direção continua legível com a animação desligada.
 - **Duas visões do floor plan**:
   - *Standard*: compacta, máquinas agrupadas por estágio com a contagem.
   - *Complex*: cada máquina desenhada individualmente, ligada por Splitters e Mergers de verdade (veja abaixo).
 
-## Splitters, Mergers e o balanceador
+## Splitters e Mergers
 
 Na visão *Complex* as junções seguem a regra do jogo, e não uma caixa genérica de N saídas:
 
@@ -47,9 +47,7 @@ Como nenhum dos dois tem versão de N vias, alimentar N máquinas a partir de um
 
 Entre dois ramos de 2 e de 3 vias, a árvore escolhe o que deixa as máquinas menos desigualmente alimentadas e, no empate, o que custa menos quadrados: dividir 6 como `[3,3]` são três Splitters, como `[2,2,2]` seriam quatro.
 
-**Números que não fecham.** Numa árvore de Splitters cada perna recebe `1/(2^a·3^b)` do trecho, então a divisão só é exata quando o número de máquinas fatora em 2 e 3. Para 5, 7, 10, 11 e afins, o app monta o **load balancer** que se constrói no jogo: superconstrói a árvore até a menor largura que divide exato (5 vira 6, 7 vira 8, 10 e 11 viram 12) e **recircula as pernas sobrando**. O tronco é dividido pelo Splitter raiz, cada ramo é completado por um Merger próprio, e as pernas de retorno são coletadas e divididas por um Splitter em uma parte para cada ramo.
-
-O 1:5 é o caso conhecido: tronco de 5 dividido em 2.5 para cada lado, cada Merger recebe 2.5 mais 0.5 do retorno e entrega 3, cada 3 vira três pernas de 1, e das seis pernas cinco vão para máquinas e uma volta. Com `r` por máquina e largura `W` em `b` ramos, cada ramo recebe `N·r/b` do tronco mais `(W−N)·r/b` do retorno, somando exatamente o `W·r/b` que suas pernas consomem. O rótulo do trecho informa quanto o loop carrega.
+**Números que não fecham.** Numa árvore de Splitters cada perna recebe `1/(2^a·3^b)` do trecho, então a divisão só é exata quando o número de máquinas fatora em 2 e 3. Para 5, 7, 10, 11 e afins as pernas saem desiguais, e a fiação fica assim mesmo: quem acerta as taxas é o clock das máquinas, não um arranjo extra de quadrados. É também como se joga na prática, já que a contrapressão das máquinas cheias reequilibra o trecho sozinha.
 
 ## Arquitetura
 
@@ -58,11 +56,11 @@ Separação em camadas, com toda a lógica de domínio pura e testável de forma
 - **`src/data`**: `data1.0.json` (dump do jogo, via [greeny/SatisfactoryTools](https://github.com/greeny/SatisfactoryTools), mesma origem da [wiki.gg](https://satisfactory.wiki.gg/)) e `loader.ts`, que transforma o JSON bruto no modelo de domínio.
 - **`src/engine`**: o núcleo. `solve.ts` monta o fecho de receitas a partir dos alvos (com detecção de ciclo), propaga a demanda até os recursos raw, dimensiona pela oferta e gera estágios, trechos de transporte (com o tier de cada um) e sinks. `helpers.ts` descobre os itens produzíveis e os pontos de troca de receita. `types.ts` guarda o modelo e as constantes verificadas (velocidades de esteira/cano, taxa do Water Extractor).
 - **`src/components`**: `Schematic.tsx` desenha o diagrama SVG nos modos Standard e Complex (ambos partem da mesma função `grid`, que ordena cada coluna pelo baricentro de quem a alimenta) e monta a fiação de junções da visão Complex; `SchematicViewport.tsx` envolve o diagrama com zoom, pan e fullscreen; `Console.tsx` é o painel lateral; `Breakdown.tsx` monta o resumo e a tabela por estágio.
-- **`src/ui`**: lógica de apresentação pura e testável de forma headless. `junctions.ts` (árvores de Splitter/Merger e o balanceador), `viewport.ts` (matemática de pan/zoom), `manualLayout.ts` (posições arrastadas e sua poda), `plannerState.ts` (o estado do console e sua hidratação a partir do salvo ou do link), `usePlanner.ts` (o estado em si, a persistência e as duas resoluções do plano) e `share.ts` (serialização do plano para a URL).
+- **`src/ui`**: lógica de apresentação pura e testável de forma headless. `junctions.ts` (árvores de Splitter/Merger), `viewport.ts` (matemática de pan/zoom), `manualLayout.ts` (posições arrastadas e sua poda), `plannerState.ts` (o estado do console e sua hidratação a partir do salvo ou do link), `usePlanner.ts` (o estado em si, a persistência e as duas resoluções do plano) e `share.ts` (serialização do plano para a URL).
 
 Todas as taxas são por minuto; fluidos em m³. Valores de máquinas, potências, taxas de mineração, esteiras e canos são verificados contra a [wiki.gg](https://satisfactory.wiki.gg/) por testes em `loader.test.ts` e `solve.test.ts`.
 
-A fiação da visão Complex é verificada por invariantes, e não só por render sem exceção: todo Merger tem exatamente uma saída e no máximo três entradas, todo Splitter o inverso, nenhuma esteira atravessa um quadrado para chegar na face oposta, e o Splitter de retorno fica abaixo de todos os Mergers que alimenta.
+A fiação da visão Complex é verificada por invariantes, e não só por render sem exceção: todo Merger tem exatamente uma saída e no máximo três entradas, todo Splitter o inverso, nenhuma esteira atravessa um quadrado para chegar na face oposta, e toda esteira corre para frente, da coluna que produz para a que consome.
 
 ## Escopo
 
@@ -73,7 +71,7 @@ Exclusões deliberadas (não são bugs):
 - Receitas `Unpackage` nunca são escolhidas por padrão (evita ciclos como Fuel → Packaged Fuel → Fuel).
 - Receitas de Converter que produzem minério são ignoradas (recurso raw é sempre extraído).
 - Potência de receitas com power variável usa a média entre min e max.
-- Quando um estágio alimenta vários destinos com demandas diferentes, o Splitter do tronco é desenhado sem balanceador. Ali a divisão igual não é o que se quer, e no jogo a contrapressão das máquinas resolve sozinha; o balanceador existe para o caso oposto, de máquinas idênticas que precisam da mesma taxa.
+- A fiação mostra por onde o material passa, não garante taxa idêntica em cada perna. Splitter divide igual entre as saídas ligadas, então contagens que não fatoram em 2 e 3 (5, 7, 10…) saem desiguais no papel; no jogo o clock e a contrapressão resolvem, e nenhum load balancer com esteira de retorno é desenhado.
 
 ## Stack
 

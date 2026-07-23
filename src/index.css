@@ -10,7 +10,6 @@
   --ficsit: #fa9549;
   --ficsit-soft: rgba(250, 149, 73, 0.14);
   --pipe: #6fb3d2;
-  --loop: #62c08d;
   --danger: #e0685f;
   --font-display: 'Bahnschrift', 'Arial Narrow', 'Segoe UI', sans-serif;
   --font-body: 'Segoe UI', system-ui, sans-serif;
@@ -523,10 +522,6 @@ button:focus-visible {
   stroke: var(--pipe);
 }
 
-.junction--loop rect {
-  stroke: var(--loop);
-}
-
 .junction text {
   fill: var(--text);
   font-family: var(--font-display);
@@ -581,16 +576,6 @@ button:focus-visible {
   }
 }
 
-/* A balancer leg going back round: its own colour, since it runs against the
-   flow and is the one belt whose direction is easy to misread. */
-.edge--loop {
-  stroke: var(--loop);
-  stroke-width: 2;
-  stroke-dasharray: 10 5;
-  /* Reversed, because the flow runs back towards the head of the tree. */
-  animation: belt-flow 1.1s linear infinite reverse;
-}
-
 /* Direction arrows dropped along every belt, so the way it runs is readable
    even with the flow animation off. */
 .arrow-belt {
@@ -601,14 +586,9 @@ button:focus-visible {
   fill: var(--pipe);
 }
 
-.arrow-loop {
-  fill: var(--loop);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .edge--belt,
-  .edge--pipe,
-  .edge--loop {
+  .edge--pipe {
     animation: none;
   }
 }
@@ -625,12 +605,6 @@ button:focus-visible {
 
 .edge-label--transport {
   fill: var(--text-dim);
-}
-
-.edge-label--loop {
-  fill: var(--text-dim);
-  font-size: 10px;
-  font-style: italic;
 }
 
 /* ---------- breakdown ---------- */

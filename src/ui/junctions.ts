@@ -7,8 +7,8 @@
 //
 // Every leaf of such a tree receives 1/(2^a·3^b) of the run, so a tree alone
 // only divides evenly when N factors into 2s and 3s. For N = 5, 7, 10, 11 … the
-// way out is the load balancer further down: overbuild the tree and feed the
-// spare legs back round.
+// legs come out uneven and stay that way: the machine clocks are what settle
+// the rates, so the wiring stays the plain tree the game builds.
 
 /** A node of the wiring tree. Leaves are machines; anything with children is a
  * Splitter (fanning out) or a Merger (the same tree read backwards). */
@@ -102,58 +102,4 @@ export function junctionTree(n: number, share = 1, offset = 0): JunctionNode {
 export function treeLevels(node: JunctionNode): number {
   if (node.children.length === 0) return 0
   return 1 + Math.max(...node.children.map(treeLevels))
-}
-
-// ---------------------------------------------------------------------------
-// Odd counts: the load balancer.
-//
-// Since every leg of a Splitter tree carries 1/(2^a·3^b) of the run, an even
-// split into 5, 7, 10, 11 … machines is impossible on a tree alone. The way it
-// is actually built in game is to overbuild the tree to the next width that
-// *does* divide evenly and send the spare legs back round into the head of the
-// tree, so the loop tops the trunk up to what the wider tree needs.
-//
-// The 1:5 balancer is the familiar case: a 6-wide tree, five legs to machines
-// and the sixth returning. The trunk carries 5, the loop carries 1, and the
-// tree divides the resulting 6 into six equal legs.
-// ---------------------------------------------------------------------------
-
-/** Smallest 2^a·3^b at least `n`: how wide the tree has to be built for its
- * legs to come out equal. */
-export function balancedWidth(n: number): number {
-  if (n <= 1) return 1
-  for (let w = n; ; w++) {
-    let rest = w
-    while (rest % 2 === 0) rest /= 2
-    while (rest % 3 === 0) rest /= 3
-    if (rest === 1) return w
-  }
-}
-
-export interface Balancer {
-  /** The Splitter tree, `width` legs all carrying the same rate */
-  tree: JunctionNode
-  /** Legs the tree is built with, at least the machine count */
-  width: number
-  /** Leg indices that go back round instead of reaching a machine */
-  loopback: number[]
-  /** Merger tree collecting those legs; null for none or a single one, which
-   * needs no Merger to join. */
-  collector: JunctionNode | null
-  /** What the loop carries, as a fraction of the run reaching the machines. */
-  feedbackRatio: number
-}
-
-/** How to wire a run to `n` identical machines so each gets exactly the same
- * rate: a tree, plus the loop that makes an awkward `n` come out even. */
-export function balancer(n: number): Balancer {
-  const width = balancedWidth(n)
-  const loopback = Array.from({ length: width - n }, (_, i) => n + i)
-  return {
-    tree: junctionTree(width),
-    width,
-    loopback,
-    collector: loopback.length > 1 ? junctionTree(loopback.length) : null,
-    feedbackRatio: loopback.length / n,
-  }
 }
