@@ -31,7 +31,7 @@ Todas as informações ficam salvas no `localStorage` do navegador entre sessõe
 - **Compartilhamento sem backend**: o estado inteiro do console é serializado no *fragmento* da URL (nunca na query, então nada trafega até um servidor). Ao abrir um link compartilhado ele vence o que estiver salvo localmente, e o fragmento é consumido em seguida, para não ficar um link visível que envelhece a cada edição. Fragmento inválido ou adulterado cai silenciosamente no plano salvo.
 - **Zoom, pan e fullscreen** no floor plan: roda do mouse amplia sob o cursor, arrastar o fundo movimenta, e há um *fit* que reenquadra. Quando a Fullscreen API é negada (sem gesto de usuário, iframe sem permissão), cai num modo que cobre a página via CSS, então o botão nunca fica morto.
 - **Reposicionamento manual por drag and drop**: arraste qualquer máquina, Splitter ou Merger, e as esteiras acompanham. Arrastar uma máquina leva junto as junções que a servem; arrastar uma junção move só ela, sem empurrar o resto da árvore. As posições são guardadas por caixa, não por plano: mexer só nas taxas de saída preserva todo o arranjo, enquanto trocar a cadeia descarta apenas as caixas que deixaram de existir. O botão ↺ desfaz o arranjo.
-- **Leitura do fluxo**: toda esteira é tracejada e animada no sentido em que corre, com setas fixas ao longo do caminho, então a direção continua legível com a animação desligada.
+- **Leitura do fluxo**: toda esteira é tracejada e animada no sentido em que corre, então o caminho de cada material fica visível de relance.
 - **Duas visões do floor plan**:
   - *Standard*: compacta, máquinas agrupadas por estágio com a contagem.
   - *Complex*: cada máquina desenhada individualmente, ligada por Splitters e Mergers de verdade (veja abaixo).

@@ -28,9 +28,9 @@ interface Props {
 }
 
 /**
- * A belt as a curve broken into several cubic pieces. One long curve would do
- * visually, but `marker-mid` only puts an arrow where two pieces meet, and the
- * arrows are what say which way the belt runs when the flow animation is off.
+ * A belt as one cubic curve. `bow` leans the control points sideways to give a
+ * roughly horizontal belt its swoop; a straight run through the manifold bus
+ * passes bow 0 and comes out a plain line.
  */
 function beltPath(
   x1: number,
@@ -39,60 +39,11 @@ function beltPath(
   y2: number,
   bow: number,
 ): string {
-  const n = Math.min(6, Math.max(2, Math.round(Math.hypot(x2 - x1, y2 - y1) / 100)))
   // Belts are stored the way they flow, so a return run goes right to left; the
   // control points have to lean the same way or the curve doubles back.
   const lean = x2 >= x1 ? bow : -bow
-  const lerp = (a: Point, b: Point, t: number) => ({
-    x: a.x + (b.x - a.x) * t,
-    y: a.y + (b.y - a.y) * t,
-  })
   const r = (v: number) => Math.round(v * 10) / 10
-  const at = (p: Point) => `${r(p.x)} ${r(p.y)}`
-
-  let p0 = { x: x1, y: y1 }
-  let p1 = { x: x1 + lean, y: y1 }
-  let p2 = { x: x2 - lean, y: y2 }
-  const p3 = { x: x2, y: y2 }
-  let d = `M ${at(p0)}`
-  for (let k = 0; k < n - 1; k++) {
-    // de Casteljau: cut the remaining curve so the pieces come out even.
-    const t = 1 / (n - k)
-    const a = lerp(p0, p1, t)
-    const b = lerp(p1, p2, t)
-    const c = lerp(p2, p3, t)
-    const ab = lerp(a, b, t)
-    const bc = lerp(b, c, t)
-    const mid = lerp(ab, bc, t)
-    d += ` C ${at(a)}, ${at(ab)}, ${at(mid)}`
-    p0 = mid
-    p1 = bc
-    p2 = c
-  }
-  return `${d} C ${at(p1)}, ${at(p2)}, ${at(p3)}`
-}
-
-/** The arrowheads `marker-mid` drops along a belt, one set per belt kind. */
-function BeltMarkers() {
-  return (
-    <defs>
-      {(['belt', 'pipe'] as const).map((kind) => (
-        <marker
-          key={kind}
-          id={`arrow-${kind}`}
-          viewBox="0 0 10 10"
-          refX="5"
-          refY="5"
-          markerWidth="9"
-          markerHeight="9"
-          markerUnits="userSpaceOnUse"
-          orient="auto"
-        >
-          <path className={`arrow-${kind}`} d="M 1 1.5 L 8.5 5 L 1 8.5 Z" />
-        </marker>
-      ))}
-    </defs>
-  )
+  return `M ${r(x1)} ${r(y1)} C ${r(x1 + lean)} ${r(y1)}, ${r(x2 - lean)} ${r(y2)}, ${r(x2)} ${r(y2)}`
 }
 
 /** Fill the container when the viewport drives the window, otherwise keep the
@@ -365,7 +316,6 @@ function StandardSchematic(props: Props) {
       role="img"
       aria-label="Factory schematic (standard)"
     >
-      <BeltMarkers />
       {plan.edges.map((e, i) => {
         const from = pos.get(e.from)
         const to = pos.get(e.to)
@@ -382,7 +332,6 @@ function StandardSchematic(props: Props) {
           <g key={i}>
             <path
               className={`edge edge--${e.transport}`}
-              markerMid={`url(#arrow-${e.transport})`}
               d={beltPath(sx, sy, tx, ty, 55)}
             />
             <text className="edge-label" x={mx} y={my - 22}>
@@ -472,6 +421,8 @@ export interface CLink {
   x2: number
   y2: number
   transport: 'belt' | 'pipe'
+  /** A straight run (a manifold bus segment), drawn without a swoop. */
+  straight?: boolean
 }
 
 export interface CJunction {
@@ -654,8 +605,8 @@ function manifoldWire(
     }
   }
   const nodes = Array.from({ length: n - 1 }, (_, i) => place(i))
-  const link = (a: Point, b: Point) =>
-    links.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, transport })
+  const link = (a: Point, b: Point, straight = false) =>
+    links.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, transport, straight })
 
   if (kind === 'splitter') {
     nodes.forEach((node, i) => {
@@ -671,8 +622,8 @@ function manifoldWire(
         inSide, outSide: 'bottom',
       })
       link(branch.pos, ports[i].pos)
-      // Pass the rest straight down: to the next square, or to the last machine.
-      link(cont.pos, i < n - 2 ? nodes[i + 1].face('top').pos : ports[n - 1].pos)
+      // The bus runs straight down: to the next square, or to the last machine.
+      link(cont.pos, i < n - 2 ? nodes[i + 1].face('top').pos : ports[n - 1].pos, true)
     })
     return nodes[0].face('left')
   }
@@ -688,8 +639,8 @@ function manifoldWire(
       inSide: 'left', outSide,
     })
     link(ports[i].pos, node.face('left').pos)
-    // The belt arriving from below: the next square's output, or the last machine.
-    link(i < n - 2 ? nodes[i + 1].face('top').pos : ports[n - 1].pos, node.face('bottom').pos)
+    // The bus climbs straight up from below: the next square, or the last machine.
+    link(i < n - 2 ? nodes[i + 1].face('top').pos : ports[n - 1].pos, node.face('bottom').pos, true)
   })
   return nodes[0].face('right')
 }
@@ -863,13 +814,11 @@ function ComplexSchematic(props: Props) {
       role="img"
       aria-label="Factory schematic (complex)"
     >
-      <BeltMarkers />
       {links.map((l, i) => (
         <path
           key={`l${i}`}
           className={`edge edge--${l.transport}`}
-          markerMid={`url(#arrow-${l.transport})`}
-          d={beltPath(l.x1, l.y1, l.x2, l.y2, 40)}
+          d={beltPath(l.x1, l.y1, l.x2, l.y2, l.straight ? 0 : 40)}
         />
       ))}
       {labels.map((lb, i) => (

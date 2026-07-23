@@ -576,16 +576,6 @@ button:focus-visible {
   }
 }
 
-/* Direction arrows dropped along every belt, so the way it runs is readable
-   even with the flow animation off. */
-.arrow-belt {
-  fill: var(--ficsit);
-}
-
-.arrow-pipe {
-  fill: var(--pipe);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .edge--belt,
   .edge--pipe {
