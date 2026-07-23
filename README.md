@@ -43,11 +43,14 @@ Na visão *Complex* as junções seguem a regra do jogo, e não uma caixa genér
 - Um **Splitter** é um quadrado com uma entrada e até três saídas, dividindo igualmente entre as saídas ligadas.
 - Um **Merger** é o mesmo quadrado espelhado: até três entradas e **uma** saída.
 
-Como nenhum dos dois tem versão de N vias, alimentar N máquinas a partir de um trecho exige uma **árvore** deles. E como uma máquina tem uma única esteira de saída, um estágio é mergeado uma vez só, por mais estágios que ele alimente; quem divide esse tronco entre os destinos é um Splitter, nunca o Merger.
+Como nenhum dos dois tem versão de N vias, alimentar N máquinas a partir de um trecho exige vários deles. E como uma máquina tem uma única esteira de saída, um estágio é mergeado uma vez só, por mais estágios que ele alimente; quem divide esse tronco entre os destinos é um Splitter, nunca o Merger.
 
-Entre dois ramos de 2 e de 3 vias, a árvore escolhe o que deixa as máquinas menos desigualmente alimentadas e, no empate, o que custa menos quadrados: dividir 6 como `[3,3]` são três Splitters, como `[2,2,2]` seriam quatro.
+Há dois jeitos de armar essa fiação, escolhidos por um toggle na visão *Complex*:
 
-**Números que não fecham.** Numa árvore de Splitters cada perna recebe `1/(2^a·3^b)` do trecho, então a divisão só é exata quando o número de máquinas fatora em 2 e 3. Para 5, 7, 10, 11 e afins as pernas saem desiguais, e a fiação fica assim mesmo: quem acerta as taxas é o clock das máquinas, não um arranjo extra de quadrados. É também como se joga na prática, já que a contrapressão das máquinas cheias reequilibra o trecho sozinha.
+- **Tree** (árvore): monta uma árvore de junções de 2 e 3 vias. Entre um ramo de 2 e um de 3, escolhe o que deixa as máquinas menos desigualmente alimentadas e, no empate, o que custa menos quadrados (dividir 6 como `[3,3]` são três Splitters, como `[2,2,2]` seriam quatro). Quando o número de máquinas fatora em 2 e 3, cada perna recebe exatamente `1/n` do trecho, de forma perfeitamente igual.
+- **Manifold**: o barramento que a maioria constrói. Um único trecho corre ao lado da coluna de máquinas e cada junção 2-via sangra uma máquina e repassa o resto, então um estágio de N máquinas usa N-1 junções de cada lado. Menos quadrados que a árvore, e a divisão igual não é garantida no papel.
+
+**Números que não fecham.** Numa árvore de Splitters cada perna recebe `1/(2^a·3^b)` do trecho, então a divisão só é exata quando o número de máquinas fatora em 2 e 3. Para 5, 7, 10, 11 e afins as pernas saem desiguais em qualquer um dos modos, e a fiação fica assim mesmo: quem acerta as taxas é o clock das máquinas mais a contrapressão das máquinas cheias, não um arranjo extra de quadrados. É como se joga na prática.
 
 ## Arquitetura
 
