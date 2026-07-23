@@ -20,7 +20,7 @@ const SHARD_OPTIONS: { shards: PowerShards; label: string }[] = [
 ]
 
 /** A two- or three-way segmented control bound to one state field. */
-function Segmented<T extends string | number>({
+function Segmented<T extends string | number | boolean>({
   value,
   options,
   onPick,
@@ -33,7 +33,7 @@ function Segmented<T extends string | number>({
     <div className="segmented">
       {options.map((o) => (
         <button
-          key={o.value}
+          key={String(o.value)}
           className={value === o.value ? 'active' : ''}
           onClick={() => onPick(o.value)}
         >
@@ -47,7 +47,8 @@ function Segmented<T extends string | number>({
 export default function Console({ planner }: { planner: Planner }) {
   const { state, patch, outputs, targetOptions, recipeChoices, maxRates } =
     planner
-  const { nodes, buildMode, powerShards, viewMode, wiringMode } = state
+  const { nodes, buildMode, powerShards, viewMode, wiringMode, showRates } =
+    state
 
   const updateNode = (key: number, change: Partial<NodeRow>) =>
     patch({ nodes: nodes.map((n) => (n.key === key ? { ...n, ...change } : n)) })
@@ -313,6 +314,19 @@ export default function Console({ planner }: { planner: Planner }) {
               {wiringMode === 'tree'
                 ? 'A balanced tree of 2- and 3-way junctions: every belt is divided equally, so a machine count that factors into 2s and 3s comes out perfectly even.'
                 : 'The plain manifold everyone builds: a single bus taps one machine per junction and passes the rest along. Fewer junctions, and belt backpressure evens the machines out.'}
+            </p>
+            <Segmented<boolean>
+              value={showRates}
+              options={[
+                { value: true, label: 'Show rates' },
+                { value: false, label: 'Hide rates' },
+              ]}
+              onPick={(v) => patch({ showRates: v })}
+            />
+            <p className="recipe-note">
+              {showRates
+                ? 'Every belt segment is labelled with what it carries, per minute.'
+                : 'Belt segments are drawn without their throughput labels.'}
             </p>
           </>
         )}

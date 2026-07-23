@@ -82,6 +82,7 @@ export default function App() {
                 data={data}
                 viewMode={planner.state.viewMode}
                 wiringMode={planner.state.wiringMode}
+                showRates={planner.state.showRates}
                 layout={planner.state.layout}
                 onLayoutChange={(layout) => planner.patch({ layout })}
               />

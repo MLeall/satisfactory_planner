@@ -16,6 +16,8 @@ interface Props {
   viewMode: ViewMode
   /** Only meaningful when viewMode is 'complex'. Defaults to a tree. */
   wiringMode?: WiringMode
+  /** Label each belt segment with its throughput. Defaults to on. */
+  showRates?: boolean
   /** Pan/zoom window supplied by the viewport. Absent means draw at intrinsic
    * size, which is what the render tests and a plain static export want. */
   viewBox?: string
@@ -373,7 +375,9 @@ function StandardSchematic(props: Props) {
 
 const CW = 158
 const CH = 46
-const COMPLEX: Metrics = { w: CW, h: CH, xgap: 300, ygap: 18, pad: 34 }
+// A roomier vertical gap than the boxes strictly need, so the per-segment rate
+// labels have somewhere to sit without landing on a belt or another box.
+const COMPLEX: Metrics = { w: CW, h: CH, xgap: 300, ygap: 34, pad: 34 }
 const NODE = 30 // splitter / merger square
 
 /** How many individual machines a stage expands into. */
@@ -423,6 +427,26 @@ export interface CLink {
   transport: 'belt' | 'pipe'
   /** A straight run (a manifold bus segment), drawn without a swoop. */
   straight?: boolean
+  /** Items per minute this segment carries, for the optional rate labels. */
+  rate?: number
+}
+
+/** Per-machine clock: every machine but the last runs at the stage's max, the
+ * last takes the remainder. Recovered from the stage totals. */
+function unitClock(stage: Stage, i: number, n: number): number {
+  return i === n - 1
+    ? stage.lastClockPercent
+    : (stage.count * 100 - stage.lastClockPercent) / (n - 1)
+}
+
+/** How `total` items/min split across a stage's `n` machines: in proportion to
+ * each machine's clock, since a slower machine pulls less off the belt. Falls
+ * back to an even split when a stage carries no clock (a sink, say). */
+function unitRates(stage: Stage, total: number, n: number): number[] {
+  if (n <= 1) return [total]
+  const clocks = Array.from({ length: n }, (_, i) => unitClock(stage, i, n))
+  const sum = clocks.reduce((a, b) => a + b, 0)
+  return sum > 0 ? clocks.map((c) => (total * c) / sum) : clocks.map(() => total / n)
 }
 
 export interface CJunction {
@@ -527,7 +551,10 @@ function wire(
   links: CLink[],
   keyBase: string,
   layout: ManualLayout,
+  rates: number[],
 ): Face {
+  const rateOf = (node: JunctionNode) =>
+    node.leaves.reduce((sum, i) => sum + (rates[i] ?? 0), 0)
   const place = (node: JunctionNode, path: string): Face => {
     if (node.children.length === 0) return ports[node.leaves[0]]
     // Centred on where the automatic layout puts the machines under it, and one
@@ -549,12 +576,13 @@ function wire(
     )
     node.children.forEach((child, i) => {
       const c = place(child, `${path}.${i}`).pos
+      const rate = rateOf(child)
       // Stored the way it flows: into a Merger from its branches, out of a
-      // Splitter towards them. The arrowheads read straight off that.
+      // Splitter towards them.
       links.push(
         kind === 'merger'
-          ? { x1: c.x, y1: c.y, x2: branch.pos.x, y2: branch.pos.y, transport }
-          : { x1: branch.pos.x, y1: branch.pos.y, x2: c.x, y2: c.y, transport },
+          ? { x1: c.x, y1: c.y, x2: branch.pos.x, y2: branch.pos.y, transport, rate }
+          : { x1: branch.pos.x, y1: branch.pos.y, x2: c.x, y2: c.y, transport, rate },
       )
     })
     return trunk
@@ -581,9 +609,12 @@ function manifoldWire(
   links: CLink[],
   keyBase: string,
   layout: ManualLayout,
+  rates: number[],
 ): Face {
   const n = ports.length
   if (n <= 1) return ports[0]
+  // What the bus still carries past machine i: the sum of everything below it.
+  const below = (i: number) => rates.slice(i + 1).reduce((a, b) => a + b, 0)
 
   // The column of squares sits one level off the machines, on the trunk side.
   const busX = dir > 0 ? edgeX + (LEVEL - NODE) : edgeX - LEVEL
@@ -605,8 +636,8 @@ function manifoldWire(
     }
   }
   const nodes = Array.from({ length: n - 1 }, (_, i) => place(i))
-  const link = (a: Point, b: Point, straight = false) =>
-    links.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, transport, straight })
+  const link = (a: Point, b: Point, rate: number, straight = false) =>
+    links.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, transport, straight, rate })
 
   if (kind === 'splitter') {
     nodes.forEach((node, i) => {
@@ -621,9 +652,10 @@ function manifoldWire(
         inPort: node.face(inSide).pos, outPort: cont.pos,
         inSide, outSide: 'bottom',
       })
-      link(branch.pos, ports[i].pos)
+      link(branch.pos, ports[i].pos, rates[i])
       // The bus runs straight down: to the next square, or to the last machine.
-      link(cont.pos, i < n - 2 ? nodes[i + 1].face('top').pos : ports[n - 1].pos, true)
+      const rest = below(i)
+      link(cont.pos, i < n - 2 ? nodes[i + 1].face('top').pos : ports[n - 1].pos, rest, true)
     })
     return nodes[0].face('left')
   }
@@ -638,9 +670,10 @@ function manifoldWire(
       inPort: node.face('left').pos, outPort: node.face(outSide).pos,
       inSide: 'left', outSide,
     })
-    link(ports[i].pos, node.face('left').pos)
+    link(ports[i].pos, node.face('left').pos, rates[i])
     // The bus climbs straight up from below: the next square, or the last machine.
-    link(i < n - 2 ? nodes[i + 1].face('top').pos : ports[n - 1].pos, node.face('bottom').pos, true)
+    const rest = below(i)
+    link(i < n - 2 ? nodes[i + 1].face('top').pos : ports[n - 1].pos, node.face('bottom').pos, rest, true)
   })
   return nodes[0].face('right')
 }
@@ -681,6 +714,7 @@ export function complexWiring(
   const links: CLink[] = []
   const junctions: CJunction[] = []
   const labels: CLabel[] = []
+  const stageById = new Map(plan.stages.map((s) => [s.id, s]))
 
   // A machine port is wherever the machine is: dragging a machine is meant to
   // take its belts and its Splitters with it.
@@ -700,17 +734,24 @@ export function complexWiring(
     const producers = unitsOf.get(fromId)!
     const transport = edges[0].transport
 
-    // One trunk out of the stage, whatever it goes on to feed.
+    // One trunk out of the stage, whatever it goes on to feed. The stage's whole
+    // output rides it, split across the producers by their clocks.
+    const totalOut = edges.reduce((sum, e) => sum + e.rate, 0)
+    const fromStage = stageById.get(fromId)
+    const mergeRates = fromStage
+      ? unitRates(fromStage, totalOut, producers.length)
+      : producers.map(() => totalOut / producers.length)
     const mergeEdge = Math.max(...producers.map((u) => u.x)) + CW
     const trunk =
       wiringMode === 'manifold'
         ? manifoldWire(
             producers.map(right), 'merger', mergeEdge, 1, transport,
-            junctions, links, `merge:${fromId}`, layout,
+            junctions, links, `merge:${fromId}`, layout, mergeRates,
           )
         : wire(
             producers.map(right), junctionTree(producers.length), 'merger',
             mergeEdge, 1, transport, junctions, links, `merge:${fromId}`, layout,
+            mergeRates,
           )
 
     const heads: Face[] = []
@@ -723,15 +764,20 @@ export function complexWiring(
       const toCol = consumers[0].x - lane * LANE_GAP
       const run = `${fromId}>${e.to}:${e.item}`
 
+      const toStage = stageById.get(e.to)
+      const splitRates = toStage
+        ? unitRates(toStage, e.rate, consumers.length)
+        : consumers.map(() => e.rate / consumers.length)
       const head =
         wiringMode === 'manifold'
           ? manifoldWire(
               consumers.map(left), 'splitter', toCol, -1, transport,
-              junctions, links, `split:${run}`, layout,
+              junctions, links, `split:${run}`, layout, splitRates,
             )
           : wire(
               consumers.map(left), junctionTree(consumers.length), 'splitter',
               toCol, -1, transport, junctions, links, `split:${run}`, layout,
+              splitRates,
             )
 
       heads.push(head)
@@ -755,6 +801,7 @@ export function complexWiring(
         x2: heads[0].pos.x,
         y2: heads[0].pos.y,
         transport,
+        rate: edges[0].rate,
       })
     } else {
       const fan = wire(
@@ -768,11 +815,13 @@ export function complexWiring(
         links,
         `fan:${fromId}`,
         layout,
+        edges.map((e) => e.rate),
       )
       links.push({
         x1: trunk.pos.x, y1: trunk.pos.y,
         x2: fan.pos.x, y2: fan.pos.y,
         transport,
+        rate: totalOut,
       })
     }
   }
@@ -800,13 +849,7 @@ function ComplexSchematic(props: Props) {
     props.layout,
     wiringMode,
   )
-
-  // Every machine but the last runs at the stage's max clock; the last one
-  // takes the remainder. Recovered from the stage totals.
-  const unitClock = (s: Stage, i: number, n: number) =>
-    i === n - 1
-      ? s.lastClockPercent
-      : (s.count * 100 - s.lastClockPercent) / (n - 1)
+  const showRates = props.showRates ?? true
 
   return (
     <svg
@@ -821,6 +864,19 @@ function ComplexSchematic(props: Props) {
           d={beltPath(l.x1, l.y1, l.x2, l.y2, l.straight ? 0 : 40)}
         />
       ))}
+      {showRates &&
+        links.map((l, i) =>
+          l.rate === undefined ? null : (
+            <text
+              key={`r${i}`}
+              className="edge-rate"
+              x={(l.x1 + l.x2) / 2}
+              y={(l.y1 + l.y2) / 2 - 3}
+            >
+              {fmt(l.rate)}
+            </text>
+          ),
+        )}
       {labels.map((lb, i) => (
         <g key={`t${i}`}>
           <text className="edge-label" x={lb.x} y={lb.y}>

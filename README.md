@@ -32,6 +32,7 @@ Todas as informações ficam salvas no `localStorage` do navegador entre sessõe
 - **Zoom, pan e fullscreen** no floor plan: roda do mouse amplia sob o cursor, arrastar o fundo movimenta, e há um *fit* que reenquadra. Quando a Fullscreen API é negada (sem gesto de usuário, iframe sem permissão), cai num modo que cobre a página via CSS, então o botão nunca fica morto.
 - **Reposicionamento manual por drag and drop**: arraste qualquer máquina, Splitter ou Merger, e as esteiras acompanham. Arrastar uma máquina leva junto as junções que a servem; arrastar uma junção move só ela, sem empurrar o resto da árvore. As posições são guardadas por caixa, não por plano: mexer só nas taxas de saída preserva todo o arranjo, enquanto trocar a cadeia descarta apenas as caixas que deixaram de existir. O botão ↺ desfaz o arranjo.
 - **Leitura do fluxo**: toda esteira é tracejada e animada no sentido em que corre, então o caminho de cada material fica visível de relance.
+- **Vazão por segmento**: na visão *Complex*, cada trecho de esteira é rotulado com quanto passa por ele, por minuto, não só o tronco de cada run. Numa árvore a taxa cai a cada divisão; num manifold o barramento vai afinando à medida que sangra cada máquina. As taxas por máquina saem proporcionais ao clock (uma máquina mais lenta puxa menos da esteira), e um toggle liga ou desliga os rótulos (ligados por padrão).
 - **Duas visões do floor plan**:
   - *Standard*: compacta, máquinas agrupadas por estágio com a contagem.
   - *Complex*: cada máquina desenhada individualmente, ligada por Splitters e Mergers de verdade (veja abaixo).
@@ -63,7 +64,7 @@ Separação em camadas, com toda a lógica de domínio pura e testável de forma
 
 Todas as taxas são por minuto; fluidos em m³. Valores de máquinas, potências, taxas de mineração, esteiras e canos são verificados contra a [wiki.gg](https://satisfactory.wiki.gg/) por testes em `loader.test.ts` e `solve.test.ts`.
 
-A fiação da visão Complex é verificada por invariantes, e não só por render sem exceção: todo Merger tem exatamente uma saída e no máximo três entradas, todo Splitter o inverso, nenhuma esteira atravessa um quadrado para chegar na face oposta, e toda esteira corre para frente, da coluna que produz para a que consome.
+A fiação da visão Complex é verificada por invariantes, e não só por render sem exceção: todo Merger tem exatamente uma saída e no máximo três entradas, todo Splitter o inverso, nenhuma esteira atravessa um quadrado para chegar na face oposta, no manifold nenhuma junção passa de duas vias, e cada junção conserva o fluxo (o que entra sai, então as taxas rotuladas fecham). No modo tree a árvore corre para frente da coluna que produz para a que consome; no manifold o barramento sobe ou desce ao lado das máquinas.
 
 ## Escopo
 

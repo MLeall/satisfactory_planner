@@ -28,6 +28,7 @@ interface Props {
   data: GameData
   viewMode: ViewMode
   wiringMode: WiringMode
+  showRates: boolean
   /** Owned by the app, not by this component: an invalid input swaps the whole
    * viewport for the error panel, and state living here would die with it. */
   layout: ManualLayout
@@ -47,6 +48,7 @@ export default function SchematicViewport({
   data,
   viewMode,
   wiringMode,
+  showRates,
   layout,
   onLayoutChange,
 }: Props) {
@@ -201,6 +203,7 @@ export default function SchematicViewport({
         data={data}
         viewMode={viewMode}
         wiringMode={wiringMode}
+        showRates={showRates}
         viewBox={viewBox(view, box.w, box.h)}
         layout={layout}
         onMoveBox={onMoveBox}

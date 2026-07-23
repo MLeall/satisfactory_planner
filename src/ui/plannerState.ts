@@ -37,6 +37,8 @@ export interface PlannerState {
   viewMode: ViewMode
   /** How the Complex view wires machines together. */
   wiringMode: WiringMode
+  /** Label each belt segment with its throughput in the Complex view. */
+  showRates: boolean
   layout: ManualLayout
 }
 
@@ -54,6 +56,7 @@ export function defaults(): PlannerState {
     powerShards: 0,
     viewMode: 'standard',
     wiringMode: 'tree',
+    showRates: true,
     layout: {},
   }
 }

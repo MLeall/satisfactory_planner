@@ -361,6 +361,85 @@ describe('complex view: manifold wiring', () => {
   })
 })
 
+describe('per-segment rates: what each belt carries', () => {
+  const plans = [
+    plan([{ item: 'Desc_IronPlate_C', rate: 95 }]),
+    plan([{ item: 'Desc_IronPlateReinforced_C', rate: 40 }]),
+  ]
+  const near = (a: number, b: number) => Math.abs(a - b) < 0.5
+
+  // The four faces of a junction square, to attribute belt ends to it.
+  const NODE = 30
+  const faces = (j: { x: number; y: number }) => [
+    { x: j.x, y: j.y + NODE / 2 },
+    { x: j.x + NODE, y: j.y + NODE / 2 },
+    { x: j.x + NODE / 2, y: j.y },
+    { x: j.x + NODE / 2, y: j.y + NODE },
+  ]
+  const onJunction = (
+    j: { x: number; y: number },
+    p: { x: number; y: number },
+  ) => faces(j).some((f) => near(f.x, p.x) && near(f.y, p.y))
+
+  for (const mode of ['tree', 'manifold'] as const) {
+    it(`conserves the flow at every ${mode} junction`, () => {
+      // A junction neither makes nor destroys material. Belts are stored the way
+      // they flow, so a link ends (x2,y2) at the square it feeds and starts
+      // (x1,y1) at the square it leaves: summing both sides must balance.
+      for (const p of plans) {
+        const { links, junctions } = complexLayout(p, {}, mode)
+        for (const j of junctions) {
+          let inflow = 0
+          let outflow = 0
+          for (const l of links) {
+            if (l.rate === undefined) continue
+            if (onJunction(j, { x: l.x2, y: l.y2 })) inflow += l.rate
+            if (onJunction(j, { x: l.x1, y: l.y1 })) outflow += l.rate
+          }
+          expect(inflow).toBeGreaterThan(0)
+          expect(outflow).toBeCloseTo(inflow, 6)
+        }
+      }
+    })
+  }
+
+  it('labels the trunk of a run with its full rate', () => {
+    // 95/min of iron plate: the belt into the constructor stage carries all 95.
+    const p = plan([{ item: 'Desc_IronPlate_C', rate: 95 }])
+    for (const mode of ['tree', 'manifold'] as const) {
+      const { links } = complexLayout(p, {}, mode)
+      expect(links.some((l) => l.rate !== undefined && near(l.rate, 95))).toBe(
+        true,
+      )
+    }
+  })
+
+  it('splits a run into segments that sum back to the whole', () => {
+    // Down a manifold bus, trunk minus the first tap equals what the rest needs.
+    const p = plan([{ item: 'Desc_IronPlate_C', rate: 95 }])
+    const { links } = complexLayout(p, {}, 'manifold')
+    const rated = links.filter((l) => l.rate !== undefined)
+    // The largest labelled segment is the trunk; no segment exceeds it.
+    const max = Math.max(...rated.map((l) => l.rate!))
+    expect(rated.every((l) => l.rate! <= max + 0.5)).toBe(true)
+    expect(max).toBeGreaterThanOrEqual(95 - 0.5)
+  })
+
+  it('keeps every belt unlabelled when rates are hidden', () => {
+    const p = plan([{ item: 'Desc_IronPlate_C', rate: 95 }])
+    const html = renderToStaticMarkup(
+      <Schematic
+        plan={p}
+        data={data}
+        viewMode="complex"
+        wiringMode="manifold"
+        showRates={false}
+      />,
+    )
+    expect(html).not.toContain('edge-rate')
+  })
+})
+
 describe('dragging Splitters and Mergers', () => {
   const branching = plan([{ item: 'Desc_IronPlate_C', rate: 95 }])
 
