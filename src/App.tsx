@@ -14,7 +14,9 @@ export default function App() {
   const [copied, setCopied] = useState(false)
 
   const share = () => {
-    const url = shareUrl(location.href, planner.state)
+    // The whole library, not just the plan on screen: a factory that imports
+    // from another is not reproducible without the one it draws on.
+    const url = shareUrl(location.href, planner.library)
     setShareLink(null)
     const copying = navigator.clipboard?.writeText(url)
     if (!copying) {
@@ -44,14 +46,14 @@ export default function App() {
         <button
           className="share"
           onClick={share}
-          title="Copy a link that rebuilds this exact plan"
+          title="Copy a link that rebuilds every factory here"
         >
           {copied ? 'Link copied' : 'Share'}
         </button>
         <button
           className="clear-all"
           onClick={planner.reset}
-          title="Reset every field"
+          title="Delete every factory and start over"
         >
           Clear all
         </button>

@@ -143,3 +143,44 @@ describe('reconcile', () => {
     expect(out.selection).toBe(selection)
   })
 })
+
+describe('imported inputs', () => {
+  it('unlocks everything downstream of an import, with no node at all', () => {
+    const targets = reachableTargets(data, [], ['Desc_IronIngot_C'])
+    expect(targets).toContain('Desc_IronPlate_C')
+    expect(targets).toContain('Desc_IronRod_C')
+    // Still nothing copper: an import only seeds what it actually is.
+    expect(targets).not.toContain('Desc_CopperIngot_C')
+    // And without that import none of it is reachable.
+    expect(reachableTargets(data, [])).not.toContain('Desc_IronPlate_C')
+  })
+
+  it('offers an imported ore as an output even with no node for it', () => {
+    expect(reachableTargets(data, [], ['Desc_OreIron_C'])).toContain(
+      'Desc_OreIron_C',
+    )
+  })
+
+  it('stops the chain at an import, dropping what fed it', () => {
+    const chain = getChainItems(
+      data,
+      'Desc_IronPlateReinforced_C',
+      {},
+      ['Desc_IronPlate_C'],
+    )
+    expect(chain).toContain('Desc_IronPlateReinforced_C')
+    expect(chain).toContain('Desc_IronScrew_C')
+    expect(chain).not.toContain('Desc_IronPlate_C')
+  })
+
+  it('keeps a target that only an import makes reachable', () => {
+    const { targets } = reconcile(
+      data,
+      [],
+      ['Desc_IronPlate_C'],
+      {},
+      ['Desc_IronIngot_C'],
+    )
+    expect(targets).toEqual(['Desc_IronPlate_C'])
+  })
+})

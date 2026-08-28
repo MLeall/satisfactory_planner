@@ -825,6 +825,37 @@ describe('solve: real dataset integration', () => {
     // 240 ore/min -> 20 RIP/min (hand-checked against wiki recipe rates)
     expect(result.plan.targets[0].rate).toBeCloseTo(20, 6)
   })
+
+  it('builds Crystal Oscillators on bought-in Quartz Crystal', () => {
+    const result = solve(data, {
+      minerTier: 3, beltMk: 5, pipeMk: 1,
+      nodes: [
+        { resource: 'Desc_OreIron_C', purity: 'pure', count: 4 },
+        { resource: 'Desc_OreCopper_C', purity: 'pure', count: 2 },
+      ],
+      imports: [{ item: 'Desc_QuartzCrystal_C', rate: 90 }],
+      targets: [{ item: 'Desc_CrystalOscillator_C' }],
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const plan = result.plan
+
+    // 36 Quartz Crystal per 2 Oscillators, so 18 each: 90/min buys 5/min.
+    expect(plan.targets[0].rate).toBeCloseTo(5, 6)
+    expect(plan.limitingResource).toBe('Desc_QuartzCrystal_C')
+    expect(plan.imports).toEqual([{ item: 'Desc_QuartzCrystal_C', rate: 90 }])
+
+    // Neither the crystal line nor the quartz it would have eaten is planned.
+    const recipes = plan.stages.map((s) => s.recipeId)
+    expect(recipes).not.toContain('Recipe_QuartzCrystal_C')
+    expect(plan.stages.some((s) => s.id === 'extract:Desc_RawQuartz_C')).toBe(
+      false,
+    )
+    // The rest of the factory is still built from the declared nodes.
+    expect(recipes).toContain('Recipe_Cable_C')
+    expect(recipes).toContain('Recipe_IronPlateReinforced_C')
+    expect(plan.stages.some((s) => s.id === 'extract:Desc_OreIron_C')).toBe(true)
+  })
 })
 
 describe('solve: power shard overclocking', () => {
@@ -1076,5 +1107,234 @@ describe('solve: sink placement', () => {
     const storage = result.plan.stages.find((s) => s.kind === 'storage')!
     expect(sink.depth).toBe(smelters.depth + 1)
     expect(sink.depth).toBeLessThan(storage.depth)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Imported inputs: a part belted in from a factory that already exists. The
+// chain has to stop at it, so none of the machines that would have made it —
+// nor anything upstream of them — end up in the plan.
+// ---------------------------------------------------------------------------
+
+describe('solve: imported inputs', () => {
+  describe('an import cuts the chain above it', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [],
+      imports: [{ item: 'ingot', rate: 60 }],
+      targets: [{ item: 'plate' }],
+    })
+    if (!result.ok) throw new Error(result.errors.join('; '))
+    const plan = result.plan
+
+    it('builds no smelter and no miner for what it imports', () => {
+      expect(plan.stages.map((s) => s.recipeId)).not.toContain('r-ingot')
+      expect(plan.stages.some((s) => s.kind === 'extractor')).toBe(false)
+    })
+
+    it('draws the import as a source stage carrying what is consumed', () => {
+      const imported = plan.stages.find((s) => s.id === 'import:ingot')!
+      expect(imported.kind).toBe('import')
+      expect(imported.outputs[0]).toEqual({ item: 'ingot', rate: 60 })
+      // Nothing is built and nothing is powered: it is a belt, not a machine.
+      expect(imported.machinesBuilt).toBe(0)
+      expect(imported.powerMW).toBe(0)
+    })
+
+    it('feeds the consuming stage straight off the import', () => {
+      const edge = plan.edges.find((e) => e.to === 'produce:plate')!
+      expect(edge.from).toBe('import:ingot')
+      expect(edge.rate).toBeCloseTo(60, 6)
+    })
+
+    it('sizes the plan off the import, which is now the tightest input', () => {
+      // 60 ingot -> 40 plate, exactly as 60 ore would have.
+      expect(plan.targets[0].rate).toBeCloseTo(40, 6)
+      expect(plan.limitingResource).toBe('ingot')
+    })
+
+    it('reports what it pulls from the other factory', () => {
+      expect(plan.imports).toHaveLength(1)
+      expect(plan.imports[0].item).toBe('ingot')
+      expect(plan.imports[0].rate).toBeCloseTo(60, 6)
+    })
+  })
+
+  it('lets a node and an import feed the same chain', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      imports: [{ item: 'ore-copper', rate: 60 }],
+      targets: [{ item: 'alloy' }],
+    })
+    if (!result.ok) throw new Error(result.errors.join('; '))
+    // 2 iron + 2 copper per alloy, 60/min of each: 30 alloy/min.
+    expect(result.plan.targets[0].rate).toBeCloseTo(30, 6)
+    expect(result.plan.stages.some((s) => s.id === 'extract:ore-iron')).toBe(true)
+    expect(result.plan.stages.some((s) => s.id === 'import:ore-copper')).toBe(true)
+  })
+
+  it('adds an imported ore to what the nodes already yield', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      imports: [{ item: 'ore-iron', rate: 120 }],
+      targets: [{ item: 'plate' }],
+    })
+    if (!result.ok) throw new Error(result.errors.join('; '))
+    // 120 belted in on top of the 60 the node yields: 180 ore -> 120 plates.
+    expect(result.plan.targets[0].rate).toBeCloseTo(120, 6)
+    // The import is used first, so the miner only covers the last 60.
+    const mined = result.plan.stages.find((s) => s.kind === 'extractor')!
+    expect(mined.outputs[0].rate).toBeCloseTo(60, 6)
+    expect(result.plan.imports[0].rate).toBeCloseTo(120, 6)
+  })
+
+  it('mines nothing at all once the import covers the whole demand', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      imports: [{ item: 'ore-iron', rate: 120 }],
+      targets: [{ item: 'plate', rate: 60 }],
+    })
+    if (!result.ok) throw new Error(result.errors.join('; '))
+    // 60 plates need 90 ore, all of it inside the 120 that arrives.
+    expect(result.plan.imports[0].rate).toBeCloseTo(90, 6)
+    expect(result.plan.stages.some((s) => s.kind === 'extractor')).toBe(false)
+  })
+
+  describe('a blank import rate means "as much as the plan needs"', () => {
+    it('pulls exactly what a requested output rate demands', () => {
+      const result = solve(fixture(), {
+        ...base,
+        nodes: [],
+        imports: [{ item: 'ingot' }],
+        targets: [{ item: 'plate', rate: 30 }],
+      })
+      if (!result.ok) throw new Error(result.errors.join('; '))
+      // 30 plate needs 45 ingot; an unlimited import never limits the plan.
+      expect(result.plan.imports).toEqual([{ item: 'ingot', rate: 45 }])
+      expect(result.plan.limitingResource).toBeNull()
+    })
+
+    it('refuses to plan a maximum when nothing limits the chain', () => {
+      const result = solve(fixture(), {
+        ...base,
+        nodes: [],
+        imports: [{ item: 'ingot' }],
+        targets: [{ item: 'plate' }],
+      })
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.errors[0]).toContain('unlimited import')
+    })
+  })
+
+  it('says which raw input the shortfall would need', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [],
+      imports: [{ item: 'ingot', rate: 30 }],
+      targets: [{ item: 'plate', rate: 30 }],
+    })
+    // 30 plates need 45 ingot; the missing 15 would have to be smelted, and
+    // there is no iron node to smelt it from.
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.errors[0]).toContain('No node or import supplies Iron Ore')
+  })
+
+  it('says so when a raw import falls short and nothing can top it up', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [],
+      imports: [{ item: 'ore-iron', rate: 30 }],
+      targets: [{ item: 'plate', rate: 30 }],
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.errors[0]).toContain('You import 30/min of Iron Ore')
+    expect(result.errors[0]).toContain('45/min is needed')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Partial imports: the rate is a ceiling, not a promise. Whatever it does not
+// cover is built here, so one item can arrive on two belts at once.
+// ---------------------------------------------------------------------------
+
+describe('solve: partly imported inputs', () => {
+  describe('an import that covers only part of the demand', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      imports: [{ item: 'ingot', rate: 30 }],
+      targets: [{ item: 'plate', rate: 60 }],
+    })
+    if (!result.ok) throw new Error(result.errors.join('; '))
+    const plan = result.plan
+
+    it('takes the import first and smelts only the difference', () => {
+      // 60 plates need 90 ingot: 30 arrive, 60 are smelted from 60 ore.
+      expect(plan.imports[0].rate).toBeCloseTo(30, 6)
+      const smelter = plan.stages.find((s) => s.recipeId === 'r-ingot')!
+      expect(smelter.outputs[0].rate).toBeCloseTo(60, 6)
+      const miner = plan.stages.find((s) => s.kind === 'extractor')!
+      expect(miner.outputs[0].rate).toBeCloseTo(60, 6)
+    })
+
+    it('feeds the consumer on two belts that add back up', () => {
+      const into = plan.edges.filter(
+        (e) => e.to === 'produce:plate' && e.item === 'ingot',
+      )
+      expect(into.map((e) => e.from).sort()).toEqual([
+        'import:ingot',
+        'produce:ingot',
+      ])
+      // Split in the proportion the two sources supply it: 30 and 60 of 90.
+      expect(into.find((e) => e.from === 'import:ingot')!.rate).toBeCloseTo(30, 6)
+      expect(into.find((e) => e.from === 'produce:ingot')!.rate).toBeCloseTo(60, 6)
+    })
+  })
+
+  it('finds the maximum a partly covered chain reaches', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      imports: [{ item: 'ingot', rate: 30 }],
+      targets: [{ item: 'plate' }],
+    })
+    if (!result.ok) throw new Error(result.errors.join('; '))
+    // 60 ore smelts to 60 ingot, plus 30 belted in: 90 ingot -> 60 plates.
+    expect(result.plan.targets[0].rate).toBeCloseTo(60, 6)
+  })
+
+  it('drops the machines entirely once the import covers everything', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      imports: [{ item: 'ingot', rate: 300 }],
+      targets: [{ item: 'plate', rate: 100 }],
+    })
+    if (!result.ok) throw new Error(result.errors.join('; '))
+    // 150 ingot needed, 300 available: nothing is smelted and nothing is mined.
+    expect(result.plan.stages.map((s) => s.recipeId)).not.toContain('r-ingot')
+    expect(result.plan.stages.some((s) => s.kind === 'extractor')).toBe(false)
+    expect(result.plan.imports[0].rate).toBeCloseTo(150, 6)
+  })
+
+  it('splits the max between two outputs that share a partial import', () => {
+    const result = solve(fixture(), {
+      ...base,
+      nodes: [{ resource: 'ore-iron', purity: 'normal', count: 1 }],
+      imports: [{ item: 'ingot', rate: 30 }],
+      targets: [{ item: 'plate' }, { item: 'widget' }],
+    })
+    if (!result.ok) throw new Error(result.errors.join('; '))
+    const rates = new Map(result.plan.targets.map((t) => [t.item, t.rate]))
+    // 90 ingot to share. Solo each would be 60 plate or 45 widget, so both
+    // land on the same fraction of their own potential: k = 1/2.
+    expect(rates.get('plate')).toBeCloseTo(30, 4)
+    expect(rates.get('widget')).toBeCloseTo(22.5, 4)
   })
 })
