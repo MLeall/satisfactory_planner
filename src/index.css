@@ -235,6 +235,124 @@ button:focus-visible {
   background: rgba(250, 149, 73, 0.24);
 }
 
+.import-row {
+  display: grid;
+  grid-template-columns: 1fr 72px 26px;
+  grid-template-rows: auto auto;
+  gap: 6px;
+  margin-bottom: 12px;
+  align-items: center;
+}
+
+/* The source spans the row above the item it is drawn from. */
+.import-row .import-source {
+  grid-row: 1;
+  grid-column: 1 / 4;
+}
+
+.import-row select:not(.import-source) {
+  grid-row: 2;
+  grid-column: 1;
+}
+
+.import-row input {
+  grid-row: 2;
+  grid-column: 2;
+}
+
+.import-row input:disabled {
+  opacity: 0.6;
+}
+
+.import-row .remove {
+  grid-row: 2;
+  grid-column: 3;
+}
+
+.import-row .remove {
+  background: none;
+  border: 1px solid var(--steel-600);
+  border-radius: 3px;
+  color: var(--text-dim);
+  cursor: pointer;
+  height: 32px;
+}
+
+.import-row .remove:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.factory-row {
+  display: grid;
+  grid-template-columns: 1fr 32px 26px;
+  gap: 6px;
+  margin-bottom: 6px;
+  align-items: center;
+}
+
+.factory-row button {
+  height: 32px;
+  background: none;
+  border: 1px solid var(--steel-600);
+  border-radius: 3px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.factory-row button:hover:not(:disabled) {
+  color: var(--ficsit);
+  border-color: var(--ficsit);
+}
+
+.factory-row .remove:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.factory-row button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.warn {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--danger);
+  background: rgba(224, 104, 95, 0.12);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.optimize {
+  width: 100%;
+  margin: 4px 0 8px;
+  background: var(--steel-700);
+  border: 1px solid var(--steel-600);
+  border-radius: 3px;
+  color: var(--text);
+  font-family: var(--font-display);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-size: 12px;
+  padding: 8px;
+  cursor: pointer;
+}
+
+.optimize:hover {
+  border-color: var(--ficsit);
+  color: var(--ficsit);
+}
+
+.optimize-result {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--ficsit);
+  background: var(--ficsit-soft);
+  font-size: 13px;
+  color: var(--text);
+}
+
 .tier-grid {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
@@ -495,6 +613,12 @@ button:focus-visible {
   stroke-dasharray: 5 4;
 }
 
+/* A source like an extractor, but dashed: nothing here is actually built. */
+.stage--import .stage-box {
+  stroke: var(--ficsit);
+  stroke-dasharray: 5 4;
+}
+
 .stage--sink .stage-box {
   stroke: var(--pipe);
 }
@@ -683,12 +807,14 @@ button:focus-visible {
   white-space: nowrap;
 }
 
-.breakdown .surplus {
+.breakdown .surplus,
+.breakdown .imports {
   margin-top: 12px;
   font-size: 13px;
   color: var(--text-dim);
 }
 
-.breakdown .surplus strong {
+.breakdown .surplus strong,
+.breakdown .imports strong {
   color: var(--text);
 }

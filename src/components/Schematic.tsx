@@ -296,15 +296,25 @@ function StandardSchematic(props: Props) {
   )
   const pos = new Map([...unitsOf].map(([id, units]) => [id, units[0]] as const))
 
+  // An import has no machines to count, so it is titled by what it is rather
+  // than by a "0x" that would read as a planning bug.
+  const title = (s: Stage): string =>
+    s.kind === 'import'
+      ? s.machineName
+      : `${s.machinesBuilt}× ${s.machineName}`
+
   const subLabel = (s: Stage): string => {
     if (s.kind === 'machine') return s.recipeName ?? ''
-    if (s.kind === 'extractor') return itemName(s.outputs[0].item)
+    if (s.kind === 'extractor' || s.kind === 'import') {
+      return itemName(s.outputs[0].item)
+    }
     if (s.kind === 'sink') return itemName(s.inputs[0].item)
     return itemName(s.inputs[0].item)
   }
 
   const metaLabel = (s: Stage): string => {
     if (s.kind === 'storage') return `${fmt(s.inputs[0].rate)}/min stored`
+    if (s.kind === 'import') return `${fmt(s.outputs[0].rate)}/min imported`
     if (s.kind === 'sink') return `${fmt(s.powerMW)} MW · sink`
     const clock =
       s.lastClockPercent === 100 ? '' : ` · last @ ${fmt(s.lastClockPercent)}%`
@@ -355,7 +365,7 @@ function StandardSchematic(props: Props) {
         >
           <rect className="stage-box" width={W} height={H} rx={5} />
           <text className="stage-count" x={12} y={26}>
-            {s.machinesBuilt}× {s.machineName}
+            {title(s)}
           </text>
           <text className="stage-sub" x={12} y={47}>
             {subLabel(s)}
@@ -920,9 +930,11 @@ function ComplexSchematic(props: Props) {
             <text className="stage-meta cx-meta" x={10} y={36}>
               {stage.kind === 'storage'
                 ? itemName(stage.inputs[0].item)
-                : stage.kind === 'sink'
-                  ? `${itemName(stage.inputs[0].item)} · sink`
-                  : `${fmt(unitClock(stage, i, units.length))}%`}
+                : stage.kind === 'import'
+                  ? `${itemName(stage.outputs[0].item)} · ${fmt(stage.outputs[0].rate)}/min`
+                  : stage.kind === 'sink'
+                    ? `${itemName(stage.inputs[0].item)} · sink`
+                    : `${fmt(unitClock(stage, i, units.length))}%`}
             </text>
           </Draggable>
         )),

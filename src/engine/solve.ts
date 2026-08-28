@@ -17,6 +17,15 @@ export interface NodeInput {
   count: number
 }
 
+export interface ImportInput {
+  item: ItemId
+  /** Delivered per minute, as a ceiling rather than a promise: the plan takes
+   * what it needs up to this, and builds the difference itself when it can.
+   * Omit (or <= 0) for as much as the plan needs, which no longer leaves
+   * anything to build and so can never be the limiting resource. */
+  rate?: number
+}
+
 export interface TargetOutput {
   item: ItemId
   /** Desired output per minute. For a single target, omit (or <= 0) to plan the
@@ -34,6 +43,14 @@ export interface PlanInput {
   pipeMk: number
   /** One or more output items to produce, each into its own storage. */
   targets: TargetOutput[]
+  /**
+   * Items belted in from a factory that already exists. An import with no rate
+   * ends the chain outright: nothing that would have produced the item is
+   * planned. An import with a rate is a partial supply — the machines (or the
+   * miner) here cover only what it does not, and disappear entirely once it
+   * covers everything.
+   */
+  imports?: ImportInput[]
   /** Per-item recipe override (default recipe when absent) */
   recipeSelection?: Record<ItemId, RecipeId>
   /** Route sinkable surplus into AWESOME Sinks for coupon points. */
@@ -61,7 +78,7 @@ export interface Flow {
 
 export interface Stage {
   id: string
-  kind: 'extractor' | 'machine' | 'storage' | 'sink'
+  kind: 'extractor' | 'machine' | 'storage' | 'sink' | 'import'
   machineId: MachineId | null
   machineName: string
   recipeId?: RecipeId
@@ -106,6 +123,8 @@ export interface Plan {
   /** Power Shards the whole plan consumes */
   totalPowerShards: number
   surplus: Flow[]
+  /** What the chain actually pulls from each imported input, per minute. */
+  imports: Flow[]
   /** AWESOME Sink coupon points per minute (0 when sink mode is off). */
   sinkPointsPerMin: number
 }
@@ -227,6 +246,36 @@ function fillExtractors(
   return { count, built, lastClock, powerUnits, shards, extracted }
 }
 
+/**
+ * The largest scale a monotonic feasibility test still accepts. It grows before
+ * it bisects: a plan whose imports cover the small end draws on no node at all
+ * down there, so `start` cannot be assumed to be an upper bound. Infinity means
+ * the test never failed, i.e. nothing limits the plan at all.
+ */
+export function largestFitting(
+  fits: (scale: number) => boolean,
+  start: number,
+): number {
+  let lo = 0
+  let hi = Number.isFinite(start) && start > 0 ? start : 1
+  let bounded = false
+  for (let i = 0; i < 64; i++) {
+    if (!fits(hi)) {
+      bounded = true
+      break
+    }
+    lo = hi
+    hi *= 2
+  }
+  if (!bounded) return Infinity
+  for (let i = 0; i < 64; i++) {
+    const mid = (lo + hi) / 2
+    if (fits(mid)) lo = mid
+    else hi = mid
+  }
+  return lo
+}
+
 export function solve(data: GameData, input: PlanInput): SolveResult {
   const itemName = (id: ItemId) => data.items.get(id)?.name ?? id
   const isLiquid = (id: ItemId) => data.items.get(id)?.liquid ?? false
@@ -268,10 +317,26 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
 
   if (input.targets.length === 0) return fail('Add at least one output item.')
 
+  // An import arrives on a belt from a factory that already exists, so the
+  // chain stops at it exactly like a raw resource: no recipe is chosen for it,
+  // and none of the machines that would have made it are planned.
+  const imported = new Map<ItemId, number>()
+  for (const imp of input.imports ?? []) {
+    const rate = imp.rate === undefined || imp.rate <= 0 ? Infinity : imp.rate
+    const prev = imported.get(imp.item)
+    imported.set(imp.item, prev === undefined ? rate : prev + rate)
+  }
+  const isImported = (id: ItemId) => imported.has(id)
+  /** Only a rateless import is a leaf on sight, because there is nothing left
+   * for machines here to do. A capped one still descends into its recipe: the
+   * machines have to be planned for whatever the import does not cover. */
+  const isLeafImport = (id: ItemId) => imported.get(id) === Infinity
+
   // A raw item is extracted, never crafted (ignores Converter ore recipes).
   const isWater = (id: ItemId) =>
     data.waterExtractor.allowedResources.includes(id)
-  const isRaw = (id: ItemId) => isWater(id) || data.nodeResources.includes(id)
+  const isRaw = (id: ItemId) =>
+    isLeafImport(id) || isWater(id) || data.nodeResources.includes(id)
 
   const chooseRecipe = (id: ItemId): Recipe | undefined => {
     const selected = input.recipeSelection?.[id]
@@ -340,8 +405,13 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       if (!recipe) continue
       const d = need.get(id) ?? 0
       if (d <= EPS) continue
+      // What arrives on a belt is not built here. A stage whose import covers
+      // the whole demand ends up with no runs at all, and the loop that turns
+      // runs into stages already drops those, so the machines simply vanish.
+      const local = d - Math.min(d, imported.get(id) ?? 0)
+      if (local <= EPS) continue
       const prodAmount = recipe.products.find((p) => p.item === id)!.amount
-      let r = d / prodAmount
+      let r = local / prodAmount
       if (whole) {
         const perMachineRuns = (60 / recipe.time) * maxClock
         // A stage with any demand at all still needs a whole machine.
@@ -374,7 +444,7 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     return miner?.allowedResources.includes(resource) ? miner : undefined
   }
 
-  const supply = new Map<ItemId, number>()
+  const nodeSupply = new Map<ItemId, number>()
   const nodeGroups = new Map<ItemId, NodeGroup[]>()
   for (const node of input.nodes) {
     if (node.count <= 0) continue
@@ -390,14 +460,28 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     // Overclocking past what the belt can carry buys nothing but power draw,
     // so the clock stops at the cap; a belt-capped node stays at 100%.
     const clock = Math.max(1, perExtractor / atFullClock)
-    supply.set(
+    nodeSupply.set(
       node.resource,
-      (supply.get(node.resource) ?? 0) + node.count * perExtractor,
+      (nodeSupply.get(node.resource) ?? 0) + node.count * perExtractor,
     )
     const groups = nodeGroups.get(node.resource) ?? []
     groups.push({ perExtractor, clock, count: node.count })
     nodeGroups.set(node.resource, groups)
   }
+
+  /** Everything an item can come from: what the nodes here yield, plus what is
+   * belted in. Declaring both a node and an import for the same ore is not a
+   * contradiction — the import is used first and the miner covers the rest. */
+  const supplyOf = (id: ItemId) =>
+    (nodeSupply.get(id) ?? 0) + (imported.get(id) ?? 0)
+
+  /** Items an import only partly covers, the rest built or mined here. Their
+   * raw draw bends at the cap, so the plan's maximum stops being a ratio to
+   * read off and has to be searched for instead. */
+  const hybrid = [...imported].some(
+    ([id, cap]) =>
+      Number.isFinite(cap) && (recipeFor.has(id) || nodeSupply.has(id)),
+  )
 
   // --- 3. Resolve each target's output rate --------------------------------
   const targetRates = new Map<ItemId, number>()
@@ -414,69 +498,134 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
   if (balanced) {
     const perUnit = new Map<ItemId, Map<ItemId, number>>()
     const weights = new Map<ItemId, number>()
+
+    const seedFor = (kk: number) =>
+      new Map([...weights].map(([item, w]) => [item, kk * w]))
+    /** Does what this seed pulls fit inside the nodes plus the imports? */
+    const fitsSeed = (seed: Map<ItemId, number>): boolean => {
+      for (const [id, v] of propagate(seed).need) {
+        if (!isRaw(id) || isWater(id) || v <= EPS) continue
+        if (v > supplyOf(id) + EPS) return false
+      }
+      return true
+    }
+    const fits = (kk: number) => fitsSeed(seedFor(kk))
+
     for (const t of input.targets) {
+      if (hybrid) {
+        // With a capped import in the chain this target's solo maximum is no
+        // longer a ratio to read off — below the cap it draws on no node at
+        // all, above it the machines kick in — so search for it instead.
+        const solo = largestFitting(
+          (r) => fitsSeed(new Map([[t.item, r]])),
+          1,
+        )
+        if (solo === Infinity) {
+          return fail(
+            `Nothing limits ${itemName(t.item)}: the imports sustain it at ` +
+              'any rate. Set an output rate, or give the imports a rate of ' +
+              'their own.',
+          )
+        }
+        if (solo <= EPS) {
+          errors.push(
+            `Your nodes and imports cannot sustain ${itemName(t.item)} at any ` +
+              'rate. Add a node, or raise an import.',
+          )
+          continue
+        }
+        weights.set(t.item, (weights.get(t.item) ?? 0) + solo)
+        continue
+      }
       const pu = rawPerUnit(t.item)
       let soloMax = Infinity
       for (const [id, v] of pu) {
-        const available = supply.get(id) ?? 0
+        const available = supplyOf(id)
         if (available <= EPS) {
-          errors.push(`No node supplies ${itemName(id)}. Add a node for it.`)
+          errors.push(
+            `No node or import supplies ${itemName(id)}. Add a node or an ` +
+              'import for it.',
+          )
           continue
         }
         soloMax = Math.min(soloMax, available / v)
       }
+      // Nothing finite to scale against: either the chain draws on no node at
+      // all, or everything it draws on is an import with no declared rate.
       if (errors.length === 0 && !Number.isFinite(soloMax)) {
-        return fail('The chain consumes no node resource. Add a resource node.')
+        return fail(
+          pu.size === 0
+            ? 'The chain consumes no node resource. Add a resource node.'
+            : `Nothing limits ${itemName(t.item)}: every input it draws on is ` +
+                'an unlimited import. Set an output rate, or give the imports ' +
+                'a rate of their own.',
+        )
       }
       perUnit.set(t.item, pu)
       weights.set(t.item, (weights.get(t.item) ?? 0) + soloMax)
     }
     if (errors.length > 0) return fail(...errors)
 
-    // Raw draw per unit of k, summed over the weighted targets.
-    const perK = new Map<ItemId, number>()
-    for (const [item, w] of weights) {
-      for (const [raw, v] of perUnit.get(item)!) {
-        perK.set(raw, (perK.get(raw) ?? 0) + w * v)
-      }
-    }
     let k = Infinity
-    for (const [raw, v] of perK) {
-      const ratio = (supply.get(raw) ?? 0) / v
-      if (ratio < k) {
-        k = ratio
-        limitingResource = raw
+    if (!hybrid) {
+      // Raw draw per unit of k, summed over the weighted targets.
+      const perK = new Map<ItemId, number>()
+      for (const [item, w] of weights) {
+        for (const [raw, v] of perUnit.get(item)!) {
+          perK.set(raw, (perK.get(raw) ?? 0) + w * v)
+        }
+      }
+      for (const [raw, v] of perK) {
+        const ratio = supplyOf(raw) / v
+        if (ratio < k) {
+          k = ratio
+          limitingResource = raw
+        }
       }
     }
 
-    const seedFor = (kk: number) =>
-      new Map([...weights].map(([item, w]) => [item, kk * w]))
-    const fits = (kk: number) => {
-      for (const [id, v] of propagate(seedFor(kk)).need) {
-        if (!isRaw(id) || isWater(id) || v <= EPS) continue
-        if (v > (supply.get(id) ?? 0) + EPS) return false
+    // Feasibility is monotonic in k whatever the mode: rounding up to whole
+    // machines only ever raises the raw draw, and a capped import only bends
+    // it. So where the linear k is not already the answer, the maximum is the
+    // largest k the plan still fits at.
+    if (hybrid || (wholeMode && !fits(k))) {
+      k = largestFitting(fits, k)
+      if (k === Infinity) {
+        return fail(
+          'Nothing limits this plan: the imports sustain it at any rate. Set ' +
+            'an output rate, or give the imports a rate of their own.',
+        )
       }
-      return true
-    }
-    // Rounding up to whole machines only ever raises the raw draw, so the
-    // linear k above is an upper bound and feasibility is monotonic in k.
-    if (wholeMode && !fits(k)) {
-      let lo = 0
-      let hi = k
-      for (let i = 0; i < 60; i++) {
-        const mid = (lo + hi) / 2
-        if (fits(mid)) lo = mid
-        else hi = mid
-      }
-      k = lo
       if (k <= EPS) {
         return fail(
-          'Whole-machine mode needs at least one full machine per stage, and ' +
-            'your nodes cannot feed them. Add nodes or switch to exact mode.',
+          wholeMode
+            ? 'Whole-machine mode needs at least one full machine per stage, ' +
+              'and your nodes cannot feed them. Add nodes or switch to exact mode.'
+            : 'Your nodes and imports cannot sustain this chain at any rate. ' +
+              'Add a node, or raise an import.',
         )
       }
     }
     for (const [item, w] of weights) targetRates.set(item, k * w)
+
+    // Which input actually ran out, read off the finished scale rather than off
+    // a ratio a capped import would have made meaningless. A capped import only
+    // counts as a ceiling while the machines here are not already covering the
+    // difference; past that point it is the ore behind them that binds.
+    if (hybrid) {
+      let tightest = Infinity
+      for (const [id, v] of propagate(seedFor(k)).need) {
+        if (isWater(id) || v <= EPS) continue
+        const cap = imported.get(id) ?? Infinity
+        const capped = Number.isFinite(cap) && v <= cap + EPS
+        if (!isRaw(id) && !capped) continue
+        const ratio = supplyOf(id) / v
+        if (ratio < tightest) {
+          tightest = ratio
+          limitingResource = id
+        }
+      }
+    }
   } else {
     for (const t of input.targets) {
       if (t.rate === undefined || t.rate <= EPS) {
@@ -508,15 +657,22 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
     let tightest = Infinity
     for (const [id, need] of demand) {
       if (!isRaw(id) || isWater(id) || need <= EPS) continue
-      const available = supply.get(id) ?? 0
+      const available = supplyOf(id)
       if (available <= EPS) {
-        errors.push(`No node supplies ${itemName(id)}. Add a node for it.`)
+        errors.push(
+          `No node or import supplies ${itemName(id)}. Add a node or an ` +
+            'import for it.',
+        )
         continue
       }
       if (need > available + EPS) {
         errors.push(
-          `Your nodes supply ${round2(available)}/min of ${itemName(id)}, but ` +
-            `${round2(need)}/min is needed. Add nodes or lower the targets.`,
+          isImported(id)
+            ? `You import ${round2(available)}/min of ${itemName(id)}, but ` +
+                `${round2(need)}/min is needed. Raise the import, or lower ` +
+                'the targets.'
+            : `Your nodes supply ${round2(available)}/min of ${itemName(id)}, but ` +
+                `${round2(need)}/min is needed. Add nodes or lower the targets.`,
         )
         continue
       }
@@ -535,8 +691,41 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
   const depth = new Map<ItemId, number>() // raw items default to 0
   const stages: Stage[] = []
   const edges: Edge[] = []
-  const producerStageId = (id: ItemId): string =>
+  /** The stage that makes an item *here*, as opposed to belting it in. */
+  const localStageId = (id: ItemId): string =>
     recipeFor.has(id) ? `produce:${id}` : `extract:${id}`
+
+  /**
+   * How much of an item actually arrives on the import belt: what is left of
+   * the demand once the machines here have made what they were going to make,
+   * never more than the declared rate. Taking the machines off first is what
+   * stops a whole-machine plan from asking the other factory for parts it is
+   * already overproducing.
+   */
+  const importedRate = (id: ItemId): number =>
+    Math.min(
+      imported.get(id) ?? 0,
+      Math.max(0, (demand.get(id) ?? 0) - (prop.made.get(id) ?? 0)),
+    )
+
+  /**
+   * The belts carrying `rate` of `item` into `to`. A partly imported item comes
+   * in on two of them — one from the import, one from the machines covering the
+   * difference — split in the proportion the two sources supply it, which is
+   * what merging the import into the local line does in the game.
+   */
+  const feed = (to: string, item: ItemId, rate: number): void => {
+    const total = demand.get(item) ?? 0
+    const share = total > EPS ? importedRate(item) / total : 0
+    if (share >= 1 - EPS) {
+      edges.push(edge(`import:${item}`, to, item, rate))
+    } else if (share <= EPS) {
+      edges.push(edge(localStageId(item), to, item, rate))
+    } else {
+      edges.push(edge(`import:${item}`, to, item, rate * share))
+      edges.push(edge(localStageId(item), to, item, rate * (1 - share)))
+    }
+  }
 
   // Machine stages, producers first so depths resolve bottom-up.
   for (const id of postOrder) {
@@ -568,7 +757,7 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       item: p.item,
       rate: p.amount * runs,
     }))
-    const stageId = producerStageId(id)
+    const stageId = localStageId(id)
     for (const p of recipe.products) {
       if (p.item !== id) {
         surplusMap.set(p.item, (surplusMap.get(p.item) ?? 0) + p.amount * runs)
@@ -604,16 +793,37 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       depth: stageDepth,
     })
 
-    for (const flow of inputs) {
-      edges.push(
-        edge(producerStageId(flow.item), stageId, flow.item, flow.rate),
-      )
-    }
+    for (const flow of inputs) feed(stageId, flow.item, flow.rate)
   }
 
-  // Extractor stages for consumed node resources.
-  for (const [resource, consumed] of demand) {
-    if (!isRaw(resource) || consumed <= EPS) continue
+  // Import stages: one per item the plan really does belt in, whether it ends
+  // the chain outright or only tops up what the machines here make.
+  const importFlows: Flow[] = []
+  for (const item of demand.keys()) {
+    const rate = importedRate(item)
+    if (rate <= EPS) continue
+    importFlows.push({ item, rate })
+    stages.push({
+      id: `import:${item}`,
+      kind: 'import',
+      machineId: null,
+      machineName: 'Imported',
+      count: 1,
+      machinesBuilt: 0,
+      lastClockPercent: 100,
+      powerMW: 0,
+      powerShards: 0,
+      inputs: [],
+      outputs: [{ item, rate }],
+      depth: 0,
+    })
+  }
+
+  // Extractor stages for the node resources the imports did not already cover.
+  for (const [resource, total] of demand) {
+    if (!isRaw(resource) || total <= EPS) continue
+    const consumed = total - importedRate(resource)
+    if (consumed <= EPS) continue
     const stageId = `extract:${resource}`
     let ext: Extractor
     let count: number
@@ -697,7 +907,7 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       outputs: [],
       depth: terminalDepth,
     })
-    edges.push(edge(producerStageId(item), `storage:${item}`, item, rate))
+    feed(`storage:${item}`, item, rate)
   }
 
   // AWESOME Sinks: consume sinkable (solid, point-bearing) surplus for coupons.
@@ -712,7 +922,7 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       sinkPointsPerMin += rate * points
       surplusMap.delete(item)
       const lanes = lanesFor(item, rate) // one input belt per sink
-      const from = byproductSource.get(item) ?? producerStageId(item)
+      const from = byproductSource.get(item) ?? localStageId(item)
       stages.push({
         id: `sink:${item}`,
         kind: 'sink',
@@ -747,6 +957,7 @@ export function solve(data: GameData, input: PlanInput): SolveResult {
       surplus: [...surplusMap]
         .filter(([, rate]) => rate > EPS)
         .map(([item, rate]) => ({ item, rate })),
+      imports: importFlows,
       sinkPointsPerMin,
     },
   }

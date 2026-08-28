@@ -1,12 +1,18 @@
 import type { GameData, ItemId, Recipe, RecipeId } from './types'
 
 /**
- * Everything obtainable from the given node resources (water always available):
- * fixpoint closure over all recipes, considering any recipe (default or
- * alternate) whose ingredients are fully available.
+ * Everything obtainable from the given node resources and imported items (water
+ * always available): fixpoint closure over all recipes, considering any recipe
+ * (default or alternate) whose ingredients are fully available. An import is a
+ * starting point just like a node, which is what lets a factory be planned
+ * around parts it buys in rather than ore it digs up.
  */
-function availableItems(data: GameData, resources: ItemId[]): Set<ItemId> {
-  const available = new Set<ItemId>(resources)
+function availableItems(
+  data: GameData,
+  resources: ItemId[],
+  imports: ItemId[] = [],
+): Set<ItemId> {
+  const available = new Set<ItemId>([...resources, ...imports])
   for (const w of data.waterExtractor.allowedResources) available.add(w)
 
   let grew = true
@@ -26,15 +32,20 @@ function availableItems(data: GameData, resources: ItemId[]): Set<ItemId> {
 }
 
 /** Items the user may pick as an output: everything reachable, minus water and
- * minus raw resources they have no node for. */
+ * minus raw resources they neither have a node for nor import. */
 export function reachableTargets(
   data: GameData,
   resources: ItemId[],
+  imports: ItemId[] = [],
 ): ItemId[] {
-  const available = availableItems(data, resources)
+  const available = availableItems(data, resources, imports)
   const water = new Set(data.waterExtractor.allowedResources)
   return [...available].filter(
-    (id) => !water.has(id) && (resources.includes(id) || !data.nodeResources.includes(id)),
+    (id) =>
+      !water.has(id) &&
+      (resources.includes(id) ||
+        imports.includes(id) ||
+        !data.nodeResources.includes(id)),
   )
 }
 
@@ -58,8 +69,9 @@ export function reconcile(
   resources: ItemId[],
   targets: ItemId[],
   selection: Record<ItemId, RecipeId>,
+  imports: ItemId[] = [],
 ): Reconciled {
-  const available = availableItems(data, resources)
+  const available = availableItems(data, resources, imports)
 
   const usable = (item: ItemId, recipeId: RecipeId): boolean => {
     const recipe = data.recipes.get(recipeId)
@@ -74,7 +86,7 @@ export function reconcile(
 
   // Reconcile against the option list the console actually offers, not the raw
   // closure: an item can be craftable yet still be an ore we have no node for.
-  const options = new Set(reachableTargets(data, resources))
+  const options = new Set(reachableTargets(data, resources, imports))
   const [fallback] = options
   // With no reachable item at all there is nothing better to offer; leave the
   // target alone and let the solver explain what is missing.
@@ -101,14 +113,17 @@ function chooseRecipe(
 
 /**
  * Crafted items in the current chain (target first, ingredients after their
- * consumers). Raw resources and water excluded. Tolerates cycles.
+ * consumers). Raw resources, water and imports excluded: the chain stops at an
+ * import, so nothing upstream of it is built here either. Tolerates cycles.
  */
 export function getChainItems(
   data: GameData,
   targetItem: ItemId,
   selection: Record<ItemId, RecipeId>,
+  imports: ItemId[] = [],
 ): ItemId[] {
   const isRaw = (id: ItemId) =>
+    imports.includes(id) ||
     data.nodeResources.includes(id) ||
     data.waterExtractor.allowedResources.includes(id)
 

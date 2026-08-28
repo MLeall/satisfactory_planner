@@ -9,7 +9,11 @@ interface Props {
 
 export default function Breakdown({ plan, data }: Props) {
   const itemName = (id: string) => data.items.get(id)?.name ?? id
-  const buildStages = plan.stages.filter((s) => s.kind !== 'storage')
+  // Storage and imports are not built, so they are no part of the machine
+  // table; what the plan pulls from each import is reported below it instead.
+  const buildStages = plan.stages.filter(
+    (s) => s.kind !== 'storage' && s.kind !== 'import',
+  )
   const totalMachines = buildStages.reduce((n, s) => n + s.machinesBuilt, 0)
 
   const recipeOrResource = (s: Stage): string => {
@@ -87,6 +91,19 @@ export default function Breakdown({ plan, data }: Props) {
           ))}
         </tbody>
       </table>
+      {plan.imports.length > 0 && (
+        <p className="imports">
+          Belted in from elsewhere:{' '}
+          {plan.imports.map((im, i) => (
+            <span key={im.item}>
+              {i > 0 && ', '}
+              <strong>
+                {fmt(im.rate)}/min {itemName(im.item)}
+              </strong>
+            </span>
+          ))}
+        </p>
+      )}
       {plan.surplus.length > 0 && (
         <p className="surplus">
           Byproduct surplus (sink or store it):{' '}

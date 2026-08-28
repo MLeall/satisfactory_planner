@@ -94,3 +94,94 @@ describe('App with stale persisted state', () => {
     }
   })
 })
+
+describe('App with an imported input', () => {
+  it('plans around the import instead of building it', () => {
+    vi.stubGlobal('location', {
+      hash:
+        '#' +
+        encodeShare({
+          nodes: [
+            { key: 1, resource: 'Desc_OreIron_C', purity: 'pure', count: 2 },
+          ],
+          imports: [{ key: 2, item: 'Desc_IronIngot_C', rate: '120' }],
+          outputs: [{ key: 3, item: 'Desc_IronPlate_C', rate: '' }],
+        }),
+      pathname: '/',
+      search: '',
+      href: 'http://x/',
+    })
+    vi.stubGlobal('localStorage', {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    })
+    const html = renderToStaticMarkup(<App />)
+
+    // Two pure nodes on a Mk.1 belt yield 120 ore -> 120 ingots, and 120 more
+    // arrive on the belt: 240 ingots -> 160 plates.
+    expect(html).toContain('MAX 160/min')
+    expect(html).toContain('Belted in from elsewhere')
+    expect(html).toContain('<strong>120/min Iron Ingot</strong>')
+    // The smelters stay, sized to just the half the import does not cover.
+    expect(html).toContain('120/min Iron Ingot</td>')
+  })
+})
+
+describe('App with several factories', () => {
+  it('plans the open one off what the other one produces', () => {
+    vi.stubGlobal('location', {
+      hash:
+        '#' +
+        encodeShare({
+          activeId: 'f2',
+          factories: [
+            {
+              id: 'f1',
+              name: 'Smelting',
+              plan: {
+                nodes: [
+                  {
+                    key: 1,
+                    resource: 'Desc_OreIron_C',
+                    purity: 'normal',
+                    count: 1,
+                  },
+                ],
+                outputs: [{ key: 1, item: 'Desc_IronIngot_C', rate: '' }],
+              },
+            },
+            {
+              id: 'f2',
+              name: 'Plates',
+              plan: {
+                nodes: [],
+                imports: [
+                  { key: 1, item: 'Desc_IronIngot_C', rate: '', from: 'f1' },
+                ],
+                outputs: [{ key: 2, item: 'Desc_IronPlate_C', rate: '' }],
+              },
+            },
+          ],
+        }),
+      pathname: '/',
+      search: '',
+      href: 'http://x/',
+    })
+    vi.stubGlobal('localStorage', {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    })
+    const html = renderToStaticMarkup(<App />)
+
+    // Smelting makes 60 ingots off one node; Plates buys all of them and turns
+    // them into 40 plates, with no miner of its own.
+    expect(html).toContain('MAX 40/min')
+    expect(html).toContain('<strong>60/min Iron Ingot</strong>')
+    expect(html).not.toContain('Miner Mk.1')
+    // The rate is the source's output, and not editable here.
+    expect(html).toContain('From Smelting')
+    expect(html).toContain('disabled=""')
+  })
+})
